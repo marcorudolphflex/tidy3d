@@ -12,7 +12,6 @@ from typing import Literal
 
 import numpy as np
 
-from .config import config
 from .exceptions import Tidy3dImportError
 from .log import log
 from .version import __version__
@@ -26,6 +25,7 @@ vtk = {
 }
 
 tidy3d_extras = {"mod": None, "use_local_subpixel": None}
+_CONFIG_LOCAL_SUBPIXEL: bool | None = None
 
 
 def check_import(module_name: str) -> bool:
@@ -182,13 +182,20 @@ def get_numpy_major_version(module=np):
     return major_version
 
 
+def set_use_local_subpixel(value: bool | None) -> None:
+    """Set the preferred use of local subpixel averaging."""
+
+    global _CONFIG_LOCAL_SUBPIXEL
+    _CONFIG_LOCAL_SUBPIXEL = value
+
+
 def supports_local_subpixel(fn):
     """When decorating a method, checks that 'tidy3d-extras' is available,
     conditioned on 'config.use_local_subpixel'."""
 
     @functools.wraps(fn)
     def _fn(*args, **kwargs):
-        if config.use_local_subpixel is False:
+        if _CONFIG_LOCAL_SUBPIXEL is False:
             tidy3d_extras["use_local_subpixel"] = False
             tidy3d_extras["mod"] = None
         else:
@@ -200,7 +207,7 @@ def supports_local_subpixel(fn):
                 except ImportError as exc:
                     tidy3d_extras["mod"] = None
                     tidy3d_extras["use_local_subpixel"] = False
-                    if config.use_local_subpixel is True:
+                    if _CONFIG_LOCAL_SUBPIXEL is True:
                         raise Tidy3dImportError(
                             "The package 'tidy3d-extras' is required for this "
                             "operation when 'config.use_local_subpixel' is 'True'. "
@@ -242,10 +249,11 @@ def disable_local_subpixel(fn):
 
     @functools.wraps(fn)
     def _fn(*args, **kwargs):
-        use_local_subpixel = config.use_local_subpixel
-        config.use_local_subpixel = False
+        global _CONFIG_LOCAL_SUBPIXEL
+        use_local_subpixel = _CONFIG_LOCAL_SUBPIXEL
+        _CONFIG_LOCAL_SUBPIXEL = False
         result = fn(*args, **kwargs)
-        config.use_local_subpixel = use_local_subpixel
+        _CONFIG_LOCAL_SUBPIXEL = use_local_subpixel
         return result
 
     return _fn

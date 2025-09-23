@@ -7,12 +7,12 @@ import os
 
 import click
 import requests
-import toml
 
-from tidy3d.web.core.constants import HEADER_APPLICATION, HEADER_APPLICATION_VALUE, KEY_APIKEY
+from tidy3d.config import config
+from tidy3d.web.core.constants import HEADER_APPLICATION, HEADER_APPLICATION_VALUE
 from tidy3d.web.core.environment import Env
 
-from .constants import CONFIG_FILE, CREDENTIAL_FILE, TIDY3D_DIR
+from .constants import CREDENTIAL_FILE, TIDY3D_DIR
 
 
 def migrate() -> bool:
@@ -61,10 +61,8 @@ def migrate() -> bool:
                     apikey = resp.json()["data"]
                 if not os.path.exists(TIDY3D_DIR):
                     os.mkdir(TIDY3D_DIR)
-                with open(CONFIG_FILE, "w+", encoding="utf-8") as config_file:
-                    toml_config = toml.loads(config_file.read())
-                    toml_config.update({KEY_APIKEY: apikey})
-                    config_file.write(toml.dumps(toml_config))
+                config.update_section("web", apikey=apikey)
+                config.save()
 
                 # rename auth.json to auth.json.bak
                 os.rename(CREDENTIAL_FILE, CREDENTIAL_FILE + ".bak")

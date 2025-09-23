@@ -66,6 +66,9 @@ You can check whether local subpixel averaging is turned on::
 
    tidy3d.packaging.tidy3d_extras["use_local_subpixel"]
 
+For a broader overview of configuration options and how they are stored, see
+:doc:`../configuration/index`.
+
 Licenses
 --------
 

@@ -11,10 +11,6 @@ from autograd.extend import defvjp, primitive
 
 import tidy3d as td
 from tidy3d.components.autograd import AutogradFieldMap
-from tidy3d.components.autograd.constants import (
-    MAX_NUM_ADJOINT_PER_FWD,
-    MAX_NUM_TRACED_STRUCTURES,
-)
 from tidy3d.components.types.workflow import WorkflowDataType, WorkflowType
 from tidy3d.exceptions import AdjointError
 from tidy3d.web.api.asynchronous import DEFAULT_DATA_DIR
@@ -59,6 +55,26 @@ _INSPECT_ADJOINT_FIELDS = False
 _INSPECT_ADJOINT_PLANE = td.Box(center=(0, 0, 0), size=(td.inf, td.inf, 0))
 
 
+def _max_traced_structures() -> int:
+    from tidy3d.config import config
+
+    return config.autograd.max_traced_structures
+
+
+def _max_adjoint_per_fwd() -> int:
+    from tidy3d.config import config
+
+    return config.autograd.max_adjoint_per_fwd
+
+
+def get_max_traced_structures() -> int:
+    return _max_traced_structures()
+
+
+def get_max_adjoint_per_fwd() -> int:
+    return _max_adjoint_per_fwd()
+
+
 def is_valid_for_autograd(simulation: td.Simulation) -> bool:
     """Check whether a supplied Simulation can use the autograd path."""
     if not isinstance(simulation, td.Simulation):
@@ -81,9 +97,10 @@ def is_valid_for_autograd(simulation: td.Simulation) -> bool:
     # if too many structures, raise an error
     structure_indices = {i for key, i, *_ in traced_fields.keys() if key == "structures"}
     num_traced_structures = len(structure_indices)
-    if num_traced_structures > MAX_NUM_TRACED_STRUCTURES:
+    max_structures = _max_traced_structures()
+    if num_traced_structures > max_structures:
         raise AdjointError(
-            f"Autograd support is currently limited to {MAX_NUM_TRACED_STRUCTURES} structures with "
+            f"Autograd support is currently limited to {max_structures} structures with "
             f"traced fields. Found {num_traced_structures} structures with traced fields."
         )
 
@@ -113,7 +130,7 @@ def run(
     simulation_type: str = "tidy3d",
     parent_tasks: typing.Optional[list[str]] = None,
     local_gradient: bool = LOCAL_GRADIENT,
-    max_num_adjoint_per_fwd: int = MAX_NUM_ADJOINT_PER_FWD,
+    max_num_adjoint_per_fwd: typing.Optional[int] = None,
     reduce_simulation: typing.Literal["auto", True, False] = "auto",
     pay_type: typing.Union[PayType, str] = PayType.AUTO,
     priority: typing.Optional[int] = None,
@@ -150,8 +167,8 @@ def run(
     local_gradient: bool = False
         Whether to perform gradient calculation locally, requiring more downloads but potentially
         more stable with experimental features.
-    max_num_adjoint_per_fwd: int = 10
-        Maximum number of adjoint simulations allowed to run automatically.
+    max_num_adjoint_per_fwd: typing.Optional[int] = None
+        Maximum number of adjoint simulations allowed to run automatically. Uses the autograd configuration when None.
     reduce_simulation: Literal["auto", True, False] = "auto"
         Whether to reduce structures in the simulation to the simulation domain only. Note: currently only implemented for the mode solver.
     pay_type: typing.Union[PayType, str] = PayType.AUTO
@@ -202,6 +219,9 @@ def run(
     :meth:`tidy3d.web.api.container.Batch.monitor`
         Monitor progress of each of the running tasks.
     """
+    if max_num_adjoint_per_fwd is None:
+        max_num_adjoint_per_fwd = _max_adjoint_per_fwd()
+
     if priority is not None and (priority < 1 or priority > 10):
         raise ValueError("Priority must be between '1' and '10' if specified.")
 
@@ -280,7 +300,7 @@ def run_async(
     solver_version: typing.Optional[str] = None,
     parent_tasks: typing.Optional[dict[str, list[str]]] = None,
     local_gradient: bool = LOCAL_GRADIENT,
-    max_num_adjoint_per_fwd: int = MAX_NUM_ADJOINT_PER_FWD,
+    max_num_adjoint_per_fwd: typing.Optional[int] = None,
     reduce_simulation: typing.Literal["auto", True, False] = "auto",
     pay_type: typing.Union[PayType, str] = PayType.AUTO,
     priority: typing.Optional[int] = None,
@@ -312,8 +332,8 @@ def run_async(
     local_gradient: bool = False
         Whether to perform gradient calculations locally, requiring more downloads but potentially
         more stable with experimental features.
-    max_num_adjoint_per_fwd: int = 10
-        Maximum number of adjoint simulations allowed to run automatically.
+    max_num_adjoint_per_fwd: typing.Optional[int] = None
+        Maximum number of adjoint simulations allowed to run automatically. Uses the autograd configuration when None.
     reduce_simulation: Literal["auto", True, False] = "auto"
         Whether to reduce structures in the simulation to the simulation domain only. Note: currently only implemented for the mode solver.
     pay_type: typing.Union[PayType, str] = PayType.AUTO
@@ -337,6 +357,9 @@ def run_async(
     # validate priority if specified
     if priority is not None and (priority < 1 or priority > 10):
         raise ValueError("Priority must be between '1' and '10' if specified.")
+
+    if max_num_adjoint_per_fwd is None:
+        max_num_adjoint_per_fwd = _max_adjoint_per_fwd()
 
     if isinstance(simulations, (tuple, list)):
         sim_dict = {}
@@ -385,7 +408,7 @@ def _run(
     simulation: td.Simulation,
     task_name: str,
     local_gradient: bool = LOCAL_GRADIENT,
-    max_num_adjoint_per_fwd: int = MAX_NUM_ADJOINT_PER_FWD,
+    max_num_adjoint_per_fwd: typing.Optional[int] = None,
     **run_kwargs,
 ) -> td.SimulationData:
     """User-facing ``web.run`` function, compatible with ``autograd`` differentiation."""
@@ -423,7 +446,7 @@ def _run(
 def _run_async(
     simulations: dict[str, td.Simulation],
     local_gradient: bool = LOCAL_GRADIENT,
-    max_num_adjoint_per_fwd: int = MAX_NUM_ADJOINT_PER_FWD,
+    max_num_adjoint_per_fwd: typing.Optional[int] = None,
     **run_async_kwargs,
 ) -> dict[str, td.SimulationData]:
     """User-facing ``web.run_async`` function, compatible with ``autograd`` differentiation."""
@@ -984,3 +1007,11 @@ def _run_async_tidy3d_bwd(
 ) -> dict[str, AutogradFieldMap]:
     """Run a batch of adjoint simulations via engine wrapper (delegated)."""
     return _run_async_tidy3d_bwd_engine(simulations=simulations, **run_kwargs)
+
+
+def __getattr__(name: str):
+    if name == "MAX_NUM_TRACED_STRUCTURES":
+        return _max_traced_structures()
+    if name == "MAX_NUM_ADJOINT_PER_FWD":
+        return _max_adjoint_per_fwd()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

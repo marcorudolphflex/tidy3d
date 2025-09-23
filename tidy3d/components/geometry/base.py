@@ -25,7 +25,6 @@ from tidy3d.components.autograd import (
     TracedSize,
     get_static,
 )
-from tidy3d.components.autograd.constants import GRADIENT_DTYPE_FLOAT
 from tidy3d.components.autograd.derivative_utils import (
     DerivativeInfo,
     FieldData,
@@ -2684,9 +2683,6 @@ class Box(SimplePlaneIntersection, Centered):
 
         Parameters
         ----------
-        dtype : np.dtype = GRADIENT_DTYPE_FLOAT
-            Data type for interpolation coordinates and values.
-
         dim_normal : str
             Surface normal of the face
         coord_normal_face : float
@@ -2757,9 +2753,6 @@ class Box(SimplePlaneIntersection, Centered):
 
         Parameters
         ----------
-        dtype : np.dtype = GRADIENT_DTYPE_FLOAT
-            Data type for interpolation coordinates and values.
-
         dim_normal : str
             Surface normal of the face
         axis_normal : Axis
@@ -3612,9 +3605,7 @@ class GeometryGroup(Geometry):
         grad_vjps = {}
 
         # create interpolators once for all geometries to avoid redundant field data conversions
-        interpolators = derivative_info.interpolators or derivative_info.create_interpolators(
-            dtype=GRADIENT_DTYPE_FLOAT
-        )
+        interpolators = derivative_info.interpolators or derivative_info.create_interpolators()
 
         for field_path in derivative_info.paths:
             _, index, *geo_path = field_path

@@ -10,11 +10,11 @@ import ssl
 
 import click
 import requests
-import toml
 
-from tidy3d.web.cli.constants import CONFIG_FILE, CREDENTIAL_FILE, TIDY3D_DIR
+from tidy3d.config import config, get_manager
+from tidy3d.web.cli.constants import CREDENTIAL_FILE, TIDY3D_DIR
 from tidy3d.web.cli.migrate import migrate
-from tidy3d.web.core.constants import HEADER_APIKEY, KEY_APIKEY
+from tidy3d.web.core.constants import HEADER_APIKEY
 from tidy3d.web.core.environment import Env
 
 from .develop.index import develop
@@ -31,12 +31,15 @@ def get_description():
         The description for the config command.
     """
 
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, encoding="utf-8") as f:
-            content = f.read()
-            config = toml.loads(content)
-            return config.get(KEY_APIKEY, "")
-    return ""
+    try:
+        apikey = config.web.apikey
+    except AttributeError:
+        return ""
+    if apikey is None:
+        return ""
+    if hasattr(apikey, "get_secret_value"):
+        return apikey.get_secret_value()
+    return str(apikey)
 
 
 @click.group()
@@ -106,10 +109,8 @@ def configure_fn(apikey: str) -> None:
 
     if resp.status_code == 200:
         click.echo("Configured successfully.")
-        with open(CONFIG_FILE, "w+", encoding="utf-8") as config_file:
-            toml_config = toml.loads(config_file.read())
-            toml_config.update({KEY_APIKEY: apikey})
-            config_file.write(toml.dumps(toml_config))
+        config.update_section("web", apikey=apikey)
+        config.save()
     else:
         click.echo("API key is invalid.")
 
@@ -132,7 +133,29 @@ def convert(lsf_file, new_file):
     )
 
 
+@click.command("config-reset")
+@click.option("--yes", is_flag=True, help="Do not prompt before resetting the configuration.")
+@click.option(
+    "--preserve-profiles",
+    is_flag=True,
+    help="Keep user profile overrides instead of deleting them.",
+)
+def config_reset(yes: bool, preserve_profiles: bool) -> None:
+    """Reset tidy3d configuration files to the default annotated state."""
+
+    if not yes:
+        message = "Reset configuration to defaults?"
+        if not preserve_profiles:
+            message += " This will delete user profiles."
+        click.confirm(message, abort=True)
+
+    manager = get_manager()
+    manager.reset_to_defaults(include_profiles=not preserve_profiles)
+    click.echo("Configuration reset to defaults.")
+
+
 tidy3d_cli.add_command(configure)
 tidy3d_cli.add_command(migration)
 tidy3d_cli.add_command(convert)
 tidy3d_cli.add_command(develop)
+tidy3d_cli.add_command(config_reset)

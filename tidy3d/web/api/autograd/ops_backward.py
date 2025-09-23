@@ -7,8 +7,8 @@ import xarray as xr
 
 import tidy3d as td
 from tidy3d.components.autograd import AutogradFieldMap, get_static
-from tidy3d.components.autograd.constants import ADJOINT_FREQ_CHUNK_SIZE
 from tidy3d.components.autograd.derivative_utils import DerivativeInfo
+from tidy3d.config import config
 from tidy3d.exceptions import AdjointError
 
 from .utils import E_to_D, get_derivative_maps
@@ -214,10 +214,12 @@ def postprocess_adj(
         bounds_intersect = (rmin_intersect, rmax_intersect)
 
         # get chunk size - if None, process all frequencies as one chunk
-        freq_chunk_size = ADJOINT_FREQ_CHUNK_SIZE
+        freq_chunk_size = config.autograd.solver_freq_chunk_size
         n_freqs = len(adjoint_frequencies)
-        if freq_chunk_size is None:
+        if not freq_chunk_size or freq_chunk_size <= 0:
             freq_chunk_size = n_freqs
+        else:
+            freq_chunk_size = min(freq_chunk_size, n_freqs)
 
         # process in chunks
         vjp_value_map = {}
