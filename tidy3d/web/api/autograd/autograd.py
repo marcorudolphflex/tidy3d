@@ -117,6 +117,7 @@ def run(
     reduce_simulation: typing.Literal["auto", True, False] = "auto",
     pay_type: typing.Union[PayType, str] = PayType.AUTO,
     priority: typing.Optional[int] = None,
+    use_cache: typing.Optional[bool] = None,
 ) -> WorkflowDataType:
     """
     Submits a :class:`.Simulation` to server, starts running, monitors progress, downloads,
@@ -248,6 +249,7 @@ def run(
             max_num_adjoint_per_fwd=max_num_adjoint_per_fwd,
             pay_type=pay_type,
             priority=priority,
+            use_cache=use_cache,
         )
 
     return run_webapi(
@@ -266,6 +268,7 @@ def run(
         reduce_simulation=reduce_simulation,
         pay_type=pay_type,
         priority=priority,
+        use_cache=use_cache,
     )
 
 
@@ -284,6 +287,7 @@ def run_async(
     reduce_simulation: typing.Literal["auto", True, False] = "auto",
     pay_type: typing.Union[PayType, str] = PayType.AUTO,
     priority: typing.Optional[int] = None,
+    use_cache: typing.Optional[bool] = None,
 ) -> BatchData:
     """Submits a set of Union[:class:`.Simulation`, :class:`.HeatSimulation`, :class:`.EMESimulation`] objects to server,
     starts running, monitors progress, downloads, and loads results as a :class:`.BatchData` object.
@@ -318,6 +322,10 @@ def run_async(
         Whether to reduce structures in the simulation to the simulation domain only. Note: currently only implemented for the mode solver.
     pay_type: typing.Union[PayType, str] = PayType.AUTO
         Specify the payment method.
+        Whether to reduce structures in the simulation to the simulation domain only. Note: currently only implemented for the mode solver.
+    use_cache: bool = None
+        Whether to use local cache if identical simulation is rerun. If not provided, cache settings from config or#
+        environment variables will be used.
 
     Returns
     ------
@@ -375,6 +383,7 @@ def run_async(
         reduce_simulation=reduce_simulation,
         pay_type=pay_type,
         priority=priority,
+        use_cache=use_cache,
     )
 
 

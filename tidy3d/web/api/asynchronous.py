@@ -24,6 +24,7 @@ def run_async(
     reduce_simulation: Literal["auto", True, False] = "auto",
     pay_type: Union[PayType, str] = PayType.AUTO,
     priority: Optional[int] = None,
+    use_cache: Optional[bool] = None,
 ) -> BatchData:
     """Submits a set of Union[:class:`.Simulation`, :class:`.HeatSimulation`, :class:`.EMESimulation`] objects to server,
     starts running, monitors progress, downloads, and loads results as a :class:`.BatchData` object.
@@ -56,6 +57,10 @@ def run_async(
     priority: int = None
         Priority of the simulation in the Virtual GPU (vGPU) queue (1 = lowest, 10 = highest).
         It affects only simulations from vGPU licenses and does not impact simulations using FlexCredits.
+    use_cache: bool = None
+        Whether to use local cache if identical simulation is rerun. If not provided, cache settings from config or#
+        environment variables will be used.
+
     Returns
     ------
     :class:`BatchData`
@@ -91,6 +96,7 @@ def run_async(
         parent_tasks=parent_tasks,
         reduce_simulation=reduce_simulation,
         pay_type=pay_type,
+        use_cache=use_cache,
     )
 
     batch_data = batch.run(path_dir=path_dir, priority=priority)

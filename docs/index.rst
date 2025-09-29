@@ -168,6 +168,13 @@ This will produce the following plot, which visualizes the electromagnetic field
 
 You can now postprocess simulation data using the same python session, or view the results of this simulation on our web-based `graphical user interface (GUI) <https://tidy3d.simulation.cloud>`_.
 
+.. tip::
+
+   Repeated runs of the same simulation can reuse solver results by enabling the optional
+   local cache: ``td.config.simulation_cache.enabled = True``. The cache location and limits are
+   configurable (see ``~/.tidy3d/config``), entries are checksum-validated, and you can clear
+   all stored artifacts with ``tidy3d.web.cache.clear()``.
+
 .. `TODO: open example in colab <https://github.com/flexcompute/tidy3d>`_
 
 
@@ -259,7 +266,6 @@ Contents
   development/index
   changelog
   About our Solver <https://www.flexcompute.com/tidy3d/solver/>
-
 
 
 

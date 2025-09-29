@@ -8,19 +8,23 @@ import time
 from abc import ABC
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
-from typing import Literal, Optional, Union
+from typing import Literal, Optional
 
 import pydantic.v1 as pd
 from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn, TimeElapsedColumn
 
 from tidy3d.components.base import Tidy3dBaseModel, cached_property
 from tidy3d.components.mode.mode_solver import ModeSolver
+from tidy3d.components.mode.simulation import ModeSimulation
 from tidy3d.components.types import annotate_type
 from tidy3d.components.types.workflow import WorkflowDataType, WorkflowType
 from tidy3d.exceptions import DataError
 from tidy3d.log import get_logging_console, log
 from tidy3d.web.api import webapi as web
 from tidy3d.web.api.tidy3d_stub import Tidy3dStub
+from tidy3d.web.api.tidy3d_stub import Tidy3dStub, Tidy3dStubData
+from tidy3d.web.api.webapi import get_reduced_simulation, _get_simulation_data_from_cache_entry
+from tidy3d.web.cache import build_cache_key, _resolve_cache, CacheEntry
 from tidy3d.web.core.constants import TaskId, TaskName
 from tidy3d.web.core.task_core import Folder
 from tidy3d.web.core.task_info import RunInfo, TaskInfo
@@ -224,6 +228,9 @@ class Job(WebContainer):
         "reduce_simulation",
     )
 
+    use_cache: Optional[bool] = None
+    cache_hit: Optional[CacheEntry] = None
+
     def to_file(self, fname: str) -> None:
         """Exports :class:`Tidy3dBaseModel` instance to .yaml, .json, or .hdf5 file
 
@@ -241,7 +248,10 @@ class Job(WebContainer):
         super(Job, self).to_file(fname=fname)  # noqa: UP008
 
     def run(
-        self, path: str = DEFAULT_DATA_PATH, priority: Optional[int] = None
+        self,
+        path: str = DEFAULT_DATA_PATH,
+        priority: Optional[int] = None,
+        use_cache: Optional[bool] = None,
     ) -> WorkflowDataType:
         """Run :class:`Job` all the way through and return data.
 
@@ -252,18 +262,40 @@ class Job(WebContainer):
         priority: int = None
             Priority of the simulation in the Virtual GPU (vGPU) queue (1 = lowest, 10 = highest).
             It affects only simulations from vGPU licenses and does not impact simulations using FlexCredits.
+        use_cache: bool = None
+            Override cache usage behaviour for this call. ``True`` forces cache usage when available,
+            ``False`` bypasses it, and ``None`` defers to configuration and environment settings.
         Returns
         -------
         :class:`WorkflowDataType`
             Object containing simulation results.
         """
-        self.upload()
-        if priority is None:
-            self.start()
-        else:
-            self.start(priority=priority)
-        self.monitor()
-        return self.load(path=path)
+        self._check_path_dir(path=path)
+
+        cache_instance = _resolve_cache(use_cache)
+        data = None
+        if cache_instance is not None:
+            sim_for_cache = self.simulation
+            if isinstance(self.simulation, (ModeSolver, ModeSimulation)) and self.reduce_simulation:
+                sim_for_cache = get_reduced_simulation(self.simulation, self.reduce_simulation)
+            entry = cache_instance.try_fetch(
+                simulation=sim_for_cache,
+                path=path,
+            )
+            data = _get_simulation_data_from_cache_entry(entry, path)
+            if data is not None:
+                return data
+
+        if data is None: # got no data from cache
+            self.upload()
+            if priority is None:
+                self.start()
+            else:
+                self.start(priority=priority)
+            self.monitor()
+            data = self.load(path=path, use_cache=use_cache)
+
+        return data
 
     @cached_property
     def task_id(self) -> TaskId:
@@ -273,10 +305,22 @@ class Job(WebContainer):
         self._check_folder(self.folder_name)
         return self._upload()
 
-    def _upload(self) -> TaskId:
+    def _upload(self) -> Optional[TaskId]:
         """Upload this job and return the task ID for handling."""
         # upload kwargs with all fields except task_id
         upload_kwargs = {key: getattr(self, key) for key in self._upload_fields}
+        cache_instance = _resolve_cache(self.use_cache)
+
+        if cache_instance is not None:
+            sim_for_cache = self.simulation
+            if isinstance(self.simulation, (ModeSolver, ModeSimulation)) and self.reduce_simulation:
+                sim_for_cache = get_reduced_simulation(self.simulation, self.reduce_simulation)
+            entry = cache_instance.try_fetch(
+                simulation=sim_for_cache
+            )
+            if entry:
+                return entry.metadata["task_ids"][0]
+
         task_id = web.upload(**upload_kwargs)
         return task_id
 
@@ -347,15 +391,23 @@ class Job(WebContainer):
         ----------
         path : str = "./simulation_data.hdf5"
             Path to download data as ``.hdf5`` file (including filename).
+        use_cache: bool = None
+            Override cache usage behaviour for this call. ``True`` forces cache usage when available,
+            ``False`` bypasses it, and ``None`` defers to configuration and environment settings.
 
         Note
         ----
         To load the data after download, use :meth:`Job.load`.
         """
+        if self.use_cache and self.cache_hit:
+            self.cache_hit.materialize(Path(path))
+            return
         self._check_path_dir(path=path)
         web.download(task_id=self.task_id, path=path, verbose=self.verbose)
 
-    def load(self, path: str = DEFAULT_DATA_PATH) -> WorkflowDataType:
+    def load(
+        self, path: str = DEFAULT_DATA_PATH, use_cache: Optional[bool] = None
+    ) -> WorkflowDataType:
         """Download job results and load them into a data object.
 
         Parameters
@@ -369,7 +421,12 @@ class Job(WebContainer):
             Object containing simulation results.
         """
         self._check_path_dir(path=path)
-        data = web.load(task_id=self.task_id, path=path, verbose=self.verbose)
+        data = web.load(
+            task_id=self.task_id,
+            path=path,
+            verbose=self.verbose,
+            use_cache=use_cache,
+        )
         if isinstance(self.simulation, ModeSolver):
             self.simulation._patch_data(data=data)
         return data
@@ -623,6 +680,8 @@ class Batch(WebContainer):
         "fields that were not used to create the task will cause errors.",
     )
 
+    use_cache: Optional[bool] = None
+
     _job_type = Job
 
     def run(
@@ -639,6 +698,9 @@ class Batch(WebContainer):
         priority: int = None
             Priority of the simulation in the Virtual GPU (vGPU) queue (1 = lowest, 10 = highest).
             It affects only simulations from vGPU licenses and does not impact simulations using FlexCredits.
+        use_cache: bool = None
+            Whether to use local cache if identical simulation is rerun. If not provided, cache settings from config or#
+            environment variables will be used.
         Returns
         ------
         :class:`BatchData`
@@ -708,6 +770,7 @@ class Batch(WebContainer):
             job_kwargs["solver_version"] = self.solver_version
             job_kwargs["pay_type"] = self.pay_type
             job_kwargs["reduce_simulation"] = self.reduce_simulation
+            job_kwargs["use_cache"] = self.use_cache
             if self.parent_tasks and task_name in self.parent_tasks:
                 job_kwargs["parent_tasks"] = self.parent_tasks[task_name]
             job = JobType(**job_kwargs)
