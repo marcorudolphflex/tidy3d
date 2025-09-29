@@ -48,7 +48,7 @@ class ResponseCodes(Enum):
     NOT_FOUND = 404
 
 
-def get_version() -> None:
+def get_version() -> str:
     """Get the version for the current environment."""
     return core_config.get_version()
 

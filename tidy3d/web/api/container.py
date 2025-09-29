@@ -486,9 +486,6 @@ class Job(WebContainer):
         ----------
         path : str = "./simulation_data.hdf5"
             Path to download data as ``.hdf5`` file (including filename).
-        use_cache: Optional[bool] = None
-            Whether to use local cache if identical simulation is rerun. If not provided, cache settings from config or
-            environment variables will be used.
 
         Returns
         -------

@@ -301,27 +301,13 @@ class SimulationCache:
             self._touch(entry)
             return entry
 
-    def fetch_by_task(self, task_id: str) -> Optional[CacheEntry]:
-        """Retrieve an entry by task id."""
-        with self._lock:
-            for entry in self._iter_entries():
-                metadata = entry.metadata
-                task_ids = metadata.get("task_ids", [])
-                if task_id in task_ids and entry.exists():
-                    if not entry.verify():
-                        self._remove_entry(entry)
-                        return None
-                    self._touch(entry)
-                    return entry
-        return None
-
     def __len__(self) -> int:
         """Return number of valid cache entries."""
         with self._lock:
             return sum(1 for _ in self._iter_entries())
 
     def _store(
-        self, key: str, task_id: Optional[str], source_path: Path, metadata: dict[str, Any]
+        self, key: str, source_path: Path, metadata: dict[str, Any]
     ) -> Optional[CacheEntry]:
         """Store a new cache entry from ``source_path``.
 
@@ -329,8 +315,6 @@ class SimulationCache:
         ----------
         key : str
             Cache key computed from simulation hash and runtime context.
-        task_id : str, optional
-            Server task id associated with this artifact.
         source_path : Path
             Location of the artifact to cache.
         metadata : dict[str, Any]
@@ -358,11 +342,6 @@ class SimulationCache:
         metadata["last_used"] = now_iso
         metadata["checksum"] = checksum
         metadata["file_size"] = file_size
-        if task_id:
-            task_ids = list(metadata.get("task_ids", []))
-            if task_id not in task_ids:
-                task_ids.append(task_id)
-            metadata["task_ids"] = task_ids
 
         _write_metadata(tmp_meta, metadata)
         try:
@@ -500,7 +479,6 @@ class SimulationCache:
 
             cache_key = build_cache_key(
                 simulation_hash=simulation_hash,
-                workflow_type=workflow_type,
                 version=versions,
             )
 
@@ -509,7 +487,7 @@ class SimulationCache:
                 return None
             if verbose:
                 log.info(
-                    "Simulation cache hit for workflow '%s'; using local results.", workflow_type
+                    f"Simulation cache hit for workflow '{workflow_type}'; using local results."
                 )
 
             return entry
@@ -538,23 +516,19 @@ class SimulationCache:
 
             cache_key = build_cache_key(
                 simulation_hash=simulation_hash,
-                workflow_type=workflow_type,
                 version=version,
             )
 
             metadata = build_entry_metadata(
                 simulation_hash=simulation_hash,
                 workflow_type=workflow_type,
-                runtime_context={
-                    "task_id": task_id,
-                },
+                task_id=task_id,
                 version=version,
-                extras={"path": str(Path(path))},
+                path=Path(path),
             )
 
             self._store(
                 key=cache_key,
-                task_id=task_id,  # keeps a reverse link for legacy fetch_by_task
                 source_path=Path(path),
                 metadata=metadata,
             )
@@ -658,14 +632,12 @@ def _canonicalize(value: Any) -> Any:
 def build_cache_key(
     *,
     simulation_hash: str,
-    workflow_type: str,
     version: str,
 ) -> str:
     """Construct a deterministic cache key."""
 
     payload = {
         "simulation_hash": simulation_hash,
-        "workflow_type": workflow_type,
         "versions": _canonicalize(version),
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -676,19 +648,17 @@ def build_entry_metadata(
     *,
     simulation_hash: str,
     workflow_type: str,
-    runtime_context: dict[str, Any],
+    task_id: str,
     version: str,
-    extras: Optional[dict[str, Any]] = None,
+    path: Path,
 ) -> dict[str, Any]:
     """Create metadata dictionary for a cache entry."""
 
     metadata: dict[str, Any] = {
         "simulation_hash": simulation_hash,
         "workflow_type": workflow_type,
-        "runtime_context": _canonicalize(runtime_context),
         "versions": _canonicalize(version),
-        "task_ids": [],
+        "task_id": task_id,
+        "path": str(path),
     }
-    if extras:
-        metadata.update(_canonicalize(extras))
     return metadata

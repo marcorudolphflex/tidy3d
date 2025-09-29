@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 import tidy3d as td
+from tests.test_components.autograd.test_autograd import ALL_KEY, get_functions, params0
 from tidy3d import config
 from tidy3d.web import Job, common, run_async
 from tidy3d.web.api import webapi as web
@@ -21,13 +22,11 @@ MOCK_TASK_ID = "task-xyz"
 # --- Fake pipeline global maps / queue ---
 TASK_TO_SIM: dict[str, td.Simulation] = {}  # task_id -> Simulation
 PATH_TO_SIM: dict[str, td.Simulation] = {}  # artifact path -> Simulation
-SIM_ORDER: list[td.Simulation] = []  # fallback queue when upload isn't called
 
 
 def _reset_fake_maps():
     TASK_TO_SIM.clear()
     PATH_TO_SIM.clear()
-    SIM_ORDER.clear()
 
 
 class _FakeStubData:
@@ -97,11 +96,8 @@ def _patch_run_pipeline(monkeypatch):
 
     def _fake_upload(**kwargs):
         counters["upload"] += 1
-        task_id = f"{MOCK_TASK_ID}{counters['upload']}"
+        task_id = f"{MOCK_TASK_ID}{kwargs['simulation']._hash_self()}"
         sim = _extract_simulation(kwargs)
-        if sim is None and SIM_ORDER:
-            # Upload wasn't given the sim (or async path differs) -> fallback
-            sim = SIM_ORDER.pop(0)
         if sim is not None:
             TASK_TO_SIM[task_id] = sim
         return task_id
@@ -116,9 +112,6 @@ def _patch_run_pipeline(monkeypatch):
         counters["download"] += 1
         # Ensure we have a simulation for this task id (even if upload wasn't called)
         sim = TASK_TO_SIM.get(task_id)
-        if sim is None and SIM_ORDER:
-            sim = SIM_ORDER.pop(0)
-            TASK_TO_SIM[task_id] = sim
         Path(path).write_text(f"payload:{task_id}")
         if sim is not None:
             PATH_TO_SIM[str(Path(path))] = sim
@@ -166,19 +159,21 @@ def _test_run_cache_hit(monkeypatch, tmp_path, basic_simulation, fake_data):
     assert counters == {"upload": 0, "start": 0, "monitor": 0, "download": 0}
 
 
-def _test_run_cache_hit_async(monkeypatch, basic_simulation):
+def _test_run_cache_hit_async(monkeypatch, basic_simulation, tmp_path):
     counters = _patch_run_pipeline(monkeypatch)
     monkeypatch.setattr(config.simulation_cache, "max_entries", 128)
     monkeypatch.setattr(config.simulation_cache, "max_size_gb", 10)
     cache = resolve_simulation_cache(use_cache=True)
     cache.clear()
+    _reset_fake_maps()
 
     _reset_counters(counters)
     sim2 = basic_simulation.updated_copy(shutoff=1e-4)
     sim3 = basic_simulation.updated_copy(shutoff=1e-3)
-    SIM_ORDER[:] = [basic_simulation, sim2, sim3]
 
-    data = run_async({"task1": basic_simulation, "task2": sim2}, use_cache=True)
+    data = run_async(
+        {"task1": basic_simulation, "task2": sim2}, use_cache=True, path_dir=str(tmp_path)
+    )
     data_task1 = data["task1"]  # access to store in cache
     data_task2 = data["task2"]  # access to store in cache
     assert counters["download"] == 2
@@ -187,23 +182,26 @@ def _test_run_cache_hit_async(monkeypatch, basic_simulation):
     assert len(cache) == 2
 
     _reset_counters(counters)
-    run_async({"task1": basic_simulation, "task2": sim2}, use_cache=True)
+    run_async({"task1": basic_simulation, "task2": sim2}, use_cache=True, path_dir=str(tmp_path))
     assert counters["download"] == 0
     assert isinstance(data_task1, _FakeStubData)
     assert len(cache) == 2
 
     _reset_counters(counters)
-    data = run_async({"task1": basic_simulation, "task3": sim3}, use_cache=True)
+    data = run_async(
+        {"task1": basic_simulation, "task3": sim3}, use_cache=True, path_dir=str(tmp_path)
+    )
 
     data_task1 = data["task1"]
     data_task2 = data["task3"]  # access to store in cache
+    print(counters["download"])
     assert counters["download"] == 1  # sim3 is new
     assert isinstance(data_task1, _FakeStubData)
     assert isinstance(data_task2, _FakeStubData)
     assert len(cache) == 3
 
 
-def _test_job_run_cache(monkeypatch, tmp_path_factory, basic_simulation):
+def _test_job_run_cache(monkeypatch, basic_simulation):
     counters = _patch_run_pipeline(monkeypatch)
     cache = resolve_simulation_cache(use_cache=True)
     cache.clear()
@@ -218,6 +216,25 @@ def _test_job_run_cache(monkeypatch, tmp_path_factory, basic_simulation):
     job2.run()
     assert len(cache) == 1
     assert counters["download"] == 0
+
+
+def _test_autograd_cache(monkeypatch):
+    counters = _patch_run_pipeline(monkeypatch)
+    cache = resolve_simulation_cache(use_cache=True)
+    cache.clear()
+
+    functions = get_functions(ALL_KEY, "mode")
+    make_sim = functions["sim"]
+    sim = make_sim(params0)
+    web.run(sim, use_cache=True)
+    assert counters["download"] == 1
+    assert len(cache) == 1
+
+    _reset_counters(counters)
+    sim = make_sim(params0)
+    web.run(sim, use_cache=True)
+    assert counters["download"] == 0
+    assert len(cache) == 1
 
 
 def _test_load_cache_hit(monkeypatch, tmp_path, basic_simulation, fake_data):
@@ -328,5 +345,6 @@ def test_cache_end_to_end(monkeypatch, tmp_path, tmp_path_factory, basic_simulat
     _test_checksum_mismatch_triggers_refresh(monkeypatch, tmp_path, basic_simulation)
     _test_cache_eviction_by_entries(monkeypatch, tmp_path_factory, basic_simulation)
     _test_cache_eviction_by_size(monkeypatch, tmp_path_factory, basic_simulation)
-    _test_run_cache_hit_async(monkeypatch, basic_simulation)
-    _test_job_run_cache(monkeypatch, tmp_path_factory, basic_simulation)
+    _test_run_cache_hit_async(monkeypatch, basic_simulation, tmp_path)
+    _test_job_run_cache(monkeypatch, basic_simulation)
+    _test_autograd_cache(monkeypatch)
