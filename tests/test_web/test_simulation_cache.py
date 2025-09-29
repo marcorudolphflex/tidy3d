@@ -4,6 +4,8 @@ import uuid
 from pathlib import Path
 
 import tidy3d as td
+from tests.test_plugins.test_adjoint import use_emulated_run
+from tests.utils import run_emulated
 from tidy3d.web.api import webapi as web
 from tidy3d.web.cache import (
     CACHE_ARTIFACT_NAME,
@@ -143,12 +145,20 @@ def _test_run_cache_hit(monkeypatch, tmp_path, basic_simulation, fake_data):
     assert isinstance(data2, _FakeStubData)
     assert counters == {"upload": 0, "start": 0, "monitor": 0, "download": 0}
 
+
+
 @pytest.mark.serial
-def test_run_cache_hit_async(monkeypatch, tmp_path, basic_simulation, fake_data):
+def test_run_cache_hit_async(use_emulated_run, monkeypatch, tmp_path, basic_simulation, fake_data):
     counters = _patch_run_pipeline(monkeypatch, tmp_path)
+    out_path = tmp_path / "result.hdf5"
     get_cache().clear()
 
-    data = run_async({"task1": basic_simulation})
+    data = web.run(basic_simulation, task_name="demo", path=str(out_path), use_cache=True)
+    assert isinstance(data, _FakeStubData)
+    assert counters == {"upload": 1, "start": 1, "monitor": 1, "download": 1}
+
+    _reset_counters(counters)
+    data = run_async({"task1": basic_simulation}, use_cache=True)
 
 
 @pytest.mark.serial
