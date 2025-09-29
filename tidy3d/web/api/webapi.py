@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 import time
+from pathlib import Path
 from typing import Callable, Literal, Optional, Union
 
 from requests import HTTPError
@@ -18,6 +19,7 @@ from tidy3d.components.types.workflow import WorkflowDataType, WorkflowType
 from tidy3d.exceptions import WebError
 from tidy3d.log import get_logging_console, log
 from tidy3d.plugins.smatrix.component_modelers.terminal import TerminalComponentModeler
+from tidy3d.web.cache import _resolve_cache, SimulationCache, CacheEntry
 from tidy3d.web.core.account import Account
 from tidy3d.web.core.constants import (
     CM_DATA_HDF5_GZ,
@@ -64,6 +66,10 @@ SOLVER_NAME = {
 }
 
 
+def _solver_version_label(value: Optional[str]) -> str:
+    return value or "default"
+
+
 def _get_url(task_id: str) -> str:
     """Get the URL for a task on our server."""
     return f"{Env.current.website_endpoint}/workbench?taskId={task_id}"
@@ -102,6 +108,12 @@ def _task_dict_to_url_bullet_list(data_dict: dict) -> str:
     # and then join them together with newline characters.
     return "\n".join([f"- {key}: '{value}'" for key, value in data_dict.items()])
 
+def _get_simulation_data_from_cache_entry(entry: CacheEntry, path: str) -> Optional[WorkflowDataType]:
+    if entry is not None:
+        entry.materialize(Path(path))
+        data = Tidy3dStubData.postprocess(path)
+        return data
+    return None
 
 @wait_for_connection
 def run(
@@ -120,6 +132,7 @@ def run(
     reduce_simulation: Literal["auto", True, False] = "auto",
     pay_type: Union[PayType, str] = PayType.AUTO,
     priority: Optional[int] = None,
+    use_cache: Optional[bool] = None,
 ) -> WorkflowDataType:
     """
     Submits a :class:`.Simulation` to server, starts running, monitors progress, downloads,
@@ -157,6 +170,9 @@ def run(
     priority: int = None
         Priority of the simulation in the Virtual GPU (vGPU) queue (1 = lowest, 10 = highest).
         It affects only simulations from vGPU licenses and does not impact simulations using FlexCredits.
+    use_cache: bool = None
+        Whether to use local cache if identical simulation is rerun. If not provided, cache settings from config or#
+        environment variables will be used.
     Returns
     -------
     Union[:class:`.SimulationData`, :class:`.HeatSimulationData`, :class:`.EMESimulationData`]
@@ -201,30 +217,49 @@ def run(
     :meth:`tidy3d.web.api.container.Batch.monitor`
         Monitor progress of each of the running tasks.
     """
-    task_id = upload(
-        simulation=simulation,
-        task_name=task_name,
-        folder_name=folder_name,
-        callback_url=callback_url,
-        verbose=verbose,
-        progress_callback=progress_callback_upload,
-        simulation_type=simulation_type,
-        parent_tasks=parent_tasks,
-        solver_version=solver_version,
-        reduce_simulation=reduce_simulation,
-    )
-    start(
-        task_id,
-        verbose=verbose,
-        solver_version=solver_version,
-        worker_group=worker_group,
-        pay_type=pay_type,
-        priority=priority,
-    )
-    monitor(task_id, verbose=verbose)
-    data = load(
-        task_id=task_id, path=path, verbose=verbose, progress_callback=progress_callback_download
-    )
+    cache_instance = _resolve_cache(use_cache)
+    data = None
+    if cache_instance is not None:
+        sim_for_cache = simulation
+        if isinstance(simulation, (ModeSolver, ModeSimulation)) and reduce_simulation:
+            sim_for_cache = get_reduced_simulation(simulation, reduce_simulation)
+        entry = cache_instance.try_fetch(
+            simulation=sim_for_cache
+        )
+        data = _get_simulation_data_from_cache_entry(entry, path)
+        if data is not None:
+            return data
+
+    if data is None: # got no data from cache
+        task_id = upload(
+            simulation=simulation,
+            task_name=task_name,
+            folder_name=folder_name,
+            callback_url=callback_url,
+            verbose=verbose,
+            progress_callback=progress_callback_upload,
+            simulation_type=simulation_type,
+            parent_tasks=parent_tasks,
+            solver_version=solver_version,
+            reduce_simulation=reduce_simulation,
+        )
+        start(
+            task_id,
+            verbose=verbose,
+            solver_version=solver_version,
+            worker_group=worker_group,
+            pay_type=pay_type,
+            priority=priority,
+        )
+        monitor(task_id, verbose=verbose)
+        data = load(
+            task_id=task_id,
+            path=path,
+            verbose=verbose,
+            progress_callback=progress_callback_download,
+            use_cache=use_cache,
+        )
+
     if isinstance(simulation, ModeSolver):
         simulation._patch_data(data=data)
     return data
@@ -969,6 +1004,7 @@ def load(
     replace_existing: bool = True,
     verbose: bool = True,
     progress_callback: Optional[Callable[[float], None]] = None,
+    use_cache: Optional[bool] = None,
 ) -> WorkflowDataType:
     """
     Download and Load simulation results into :class:`.SimulationData` object.
@@ -998,6 +1034,9 @@ def load(
         If ``True``, will print progressbars and status, otherwise, will run silently.
     progress_callback : Callable[[float], None] = None
         Optional callback function called when downloading file with ``bytes_in_chunk`` as argument.
+    use_cache: bool = None
+        Whether to use local cache if identical simulation is rerun. If not provided, cache settings from config or#
+        environment variables will be used.
 
     Returns
     -------
@@ -1009,7 +1048,17 @@ def load(
         base_dir = os.path.dirname(path) or "."
         path = os.path.join(base_dir, "cm_data.hdf5")
 
-    if not os.path.exists(path) or replace_existing:
+    cache_instance = _resolve_cache(use_cache)
+    data = None
+    if cache_instance is not None:
+        entry = cache_instance.try_fetch_by_task(
+            task_id=task_id, verbose=verbose
+        )
+        data = _get_simulation_data_from_cache_entry(entry, path)
+        if data is not None:
+            return data
+
+    if not data and (not os.path.exists(path) or replace_existing):
         download(task_id=task_id, path=path, verbose=verbose, progress_callback=progress_callback)
 
     if verbose:
@@ -1020,6 +1069,17 @@ def load(
             console.log(f"loading simulation from {path}")
 
     stub_data = Tidy3dStubData.postprocess(path)
+
+    if cache_instance is not None:
+        info = get_info(task_id, verbose=False)
+        workflow_type = getattr(info, "taskType", None) or type(stub_data).__name__
+        cache_instance.store_result(
+            stub_data=stub_data,
+            task_id=task_id,
+            path=path,
+            workflow_type=workflow_type,
+        )
+
     return stub_data
 
 

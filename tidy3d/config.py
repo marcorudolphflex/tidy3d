@@ -2,11 +2,41 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Optional
 
 import pydantic.v1 as pd
 
 from .log import DEFAULT_LEVEL, LogLevel, set_log_suppression, set_logging_level
+
+_DEFAULT_CACHE_DIR = Path.home() / ".tidy3d" / "cache" / "simulations"
+
+
+class SimulationCacheSettings(pd.BaseModel):
+    """Settings controlling the optional local simulation cache."""
+
+    enabled: bool = pd.Field(
+        False,
+        description="Enable or disable the local simulation cache.",
+    )
+    directory: Path = pd.Field(
+        _DEFAULT_CACHE_DIR,
+        description="Directory where cached simulation artifacts are stored.",
+    )
+    max_size_gb: float = pd.Field(
+        10.0,
+        description="Maximum cache size in gigabytes. Set to 0 for no size limit.",
+        ge=0.0,
+    )
+    max_entries: int = pd.Field(
+        25,
+        description="Maximum number of cache entries. Set to 0 for no limit.",
+        ge=0,
+    )
+
+    @pd.validator("directory", pre=True, always=True)
+    def _validate_directory(cls, value):
+        return Path(value).expanduser()
 
 
 class Tidy3dConfig(pd.BaseModel):
@@ -41,6 +71,12 @@ class Tidy3dConfig(pd.BaseModel):
         None,
         title="Whether to use local subpixel averaging. If 'None', local subpixel "
         "averaging will be used if 'tidy3d-extras' is installed and not used otherwise.",
+    )
+
+    simulation_cache: SimulationCacheSettings = pd.Field(
+        SimulationCacheSettings(),
+        title="Simulation Cache",
+        description="Configuration for the optional local simulation cache.",
     )
 
     @pd.validator("logging_level", pre=True, always=True)
