@@ -8,7 +8,8 @@ import time
 from abc import ABC
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
-from typing import Literal, Optional
+from pathlib import Path
+from typing import Literal, Optional, Union
 
 import pydantic.v1 as pd
 from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn, TimeElapsedColumn
@@ -229,7 +230,6 @@ class Job(WebContainer):
     )
 
     use_cache: Optional[bool] = None
-    cache_hit: Optional[CacheEntry] = None
 
     def to_file(self, fname: str) -> None:
         """Exports :class:`Tidy3dBaseModel` instance to .yaml, .json, or .hdf5 file
@@ -246,6 +246,18 @@ class Job(WebContainer):
         task_id_cached = self._cached_properties.get("task_id")
         self = self.updated_copy(task_id_cached=task_id_cached)
         super(Job, self).to_file(fname=fname)  # noqa: UP008
+
+    def get_cache_hit_entry(self) -> Optional[CacheEntry]:
+        cache_instance = _resolve_cache(self.use_cache)
+        if cache_instance is not None:
+            sim_for_cache = self.simulation
+            if isinstance(self.simulation, (ModeSolver, ModeSimulation)) and self.reduce_simulation:
+                sim_for_cache = get_reduced_simulation(self.simulation, self.reduce_simulation)
+            entry = cache_instance.try_fetch(
+                simulation=sim_for_cache,
+            )
+            return entry
+        return None
 
     def run(
         self,
@@ -274,14 +286,8 @@ class Job(WebContainer):
 
         cache_instance = _resolve_cache(use_cache)
         data = None
-        if cache_instance is not None:
-            sim_for_cache = self.simulation
-            if isinstance(self.simulation, (ModeSolver, ModeSimulation)) and self.reduce_simulation:
-                sim_for_cache = get_reduced_simulation(self.simulation, self.reduce_simulation)
-            entry = cache_instance.try_fetch(
-                simulation=sim_for_cache,
-                path=path,
-            )
+        entry = self.get_cache_hit_entry()
+        if entry is not None:
             data = _get_simulation_data_from_cache_entry(entry, path)
             if data is not None:
                 return data
@@ -399,9 +405,13 @@ class Job(WebContainer):
         ----
         To load the data after download, use :meth:`Job.load`.
         """
-        if self.use_cache and self.cache_hit:
-            self.cache_hit.materialize(Path(path))
-            return
+        cache_instance = _resolve_cache(self.use_cache)
+        print("GELLO", self.use_cache, cache_instance)
+        if cache_instance is not None:
+            entry = self.get_cache_hit_entry()
+            if entry is not None:
+                entry.materialize(Path(path))
+                return
         self._check_path_dir(path=path)
         web.download(task_id=self.task_id, path=path, verbose=self.verbose)
 
@@ -1088,7 +1098,7 @@ class Batch(WebContainer):
                         log.info(f"File '{job_path_str}' already exists. Overwriting.")
                     else:
                         log.info(f"File '{job_path_str}' already exists. Skipping.")
-                        continue
+                        # continue
                 if "error" in job.status:
                     log.warning(f"Not downloading '{task_name}' as the task errored.")
                     continue
