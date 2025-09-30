@@ -477,13 +477,17 @@ class BatchData(Tidy3dBaseModel, Mapping):
         True, title="Verbose", description="Whether to print info messages and progressbars."
     )
 
+    lazy: bool = pd.Field(
+        False, title="Lazy", description="Whether to load the actual data (lazy=False) or return a proxy that loads the data when accessed (lazy=True)."
+    )
+
     def load_sim_data(self, task_name: str) -> WorkflowDataType:
         """Load a simulation data object from file by task name."""
         task_data_path = self.task_paths[task_name]
         task_id = self.task_ids[task_name]
         web.get_info(task_id)
 
-        return web.load(task_id=task_id, path=task_data_path, verbose=False)
+        return web.load(task_id=task_id, path=task_data_path, verbose=False, lazy=self.lazy)
 
     def __getitem__(self, task_name: TaskName) -> WorkflowDataType:
         """Get the simulation data object for a given ``task_name``."""
@@ -1087,7 +1091,7 @@ class Batch(WebContainer):
             task_paths[task_name] = self._job_data_path(task_id=job.task_id, path_dir=path_dir)
             task_ids[task_name] = self.jobs[task_name].task_id
 
-        data = BatchData(task_paths=task_paths, task_ids=task_ids, verbose=self.verbose)
+        data = BatchData(task_paths=task_paths, task_ids=task_ids, verbose=self.verbose, lazy=True)
 
         for task_name, job in self.jobs.items():
             if isinstance(job.simulation, ModeSolver):
