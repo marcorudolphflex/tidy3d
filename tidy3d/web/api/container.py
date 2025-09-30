@@ -248,12 +248,12 @@ class Job(WebContainer):
         super(Job, self).to_file(fname=fname)  # noqa: UP008
 
     def get_cache_hit_entry(self) -> Optional[CacheEntry]:
-        cache_instance = _resolve_cache(self.use_cache)
-        if cache_instance is not None:
+        simulation_cache = _resolve_cache(self.use_cache)
+        if simulation_cache is not None:
             sim_for_cache = self.simulation
             if isinstance(self.simulation, (ModeSolver, ModeSimulation)) and self.reduce_simulation:
                 sim_for_cache = get_reduced_simulation(self.simulation, self.reduce_simulation)
-            entry = cache_instance.try_fetch(
+            entry = simulation_cache.try_fetch(
                 simulation=sim_for_cache,
             )
             return entry
@@ -284,7 +284,6 @@ class Job(WebContainer):
         """
         self._check_path_dir(path=path)
 
-        cache_instance = _resolve_cache(use_cache)
         data = None
         entry = self.get_cache_hit_entry()
         if entry is not None:
@@ -315,13 +314,13 @@ class Job(WebContainer):
         """Upload this job and return the task ID for handling."""
         # upload kwargs with all fields except task_id
         upload_kwargs = {key: getattr(self, key) for key in self._upload_fields}
-        cache_instance = _resolve_cache(self.use_cache)
+        simulation_cache = _resolve_cache(self.use_cache)
 
-        if cache_instance is not None:
+        if simulation_cache is not None:
             sim_for_cache = self.simulation
             if isinstance(self.simulation, (ModeSolver, ModeSimulation)) and self.reduce_simulation:
                 sim_for_cache = get_reduced_simulation(self.simulation, self.reduce_simulation)
-            entry = cache_instance.try_fetch(
+            entry = simulation_cache.try_fetch(
                 simulation=sim_for_cache
             )
             if entry:
@@ -363,12 +362,14 @@ class Job(WebContainer):
         ----
         To monitor progress of the :class:`Job`, call :meth:`Job.monitor` after started.
         """
-        web.start(
-            self.task_id,
-            solver_version=self.solver_version,
-            pay_type=self.pay_type,
-            priority=priority,
-        )
+        entry = self.get_cache_hit_entry()
+        if entry is None:
+            web.start(
+                self.task_id,
+                solver_version=self.solver_version,
+                pay_type=self.pay_type,
+                priority=priority,
+            )
 
     def get_run_info(self) -> RunInfo:
         """Return information about the running :class:`Job`.
@@ -405,12 +406,19 @@ class Job(WebContainer):
         ----
         To load the data after download, use :meth:`Job.load`.
         """
-        cache_instance = _resolve_cache(self.use_cache)
-        print("GELLO", self.use_cache, cache_instance)
-        if cache_instance is not None:
+        simulation_cache = _resolve_cache(self.use_cache)
+        if simulation_cache is not None:
             entry = self.get_cache_hit_entry()
             if entry is not None:
                 entry.materialize(Path(path))
+                print("GMATERIALIZED")
+                # workflow_type = self.simulation_type
+                # simulation_cache.store_result(
+                #     stub_data=data,
+                #     task_id=self.task_id,
+                #     path=path,
+                #     workflow_type=workflow_type,
+                # )
                 return
         self._check_path_dir(path=path)
         web.download(task_id=self.task_id, path=path, verbose=self.verbose)
@@ -1098,7 +1106,7 @@ class Batch(WebContainer):
                         log.info(f"File '{job_path_str}' already exists. Overwriting.")
                     else:
                         log.info(f"File '{job_path_str}' already exists. Skipping.")
-                        # continue
+                        # continue # TODO remove
                 if "error" in job.status:
                     log.warning(f"Not downloading '{task_name}' as the task errored.")
                     continue
