@@ -217,13 +217,13 @@ def run(
     :meth:`tidy3d.web.api.container.Batch.monitor`
         Monitor progress of each of the running tasks.
     """
-    cache_instance = _resolve_cache(use_cache)
+    simulation_cache = _resolve_cache(use_cache)
     data = None
-    if cache_instance is not None:
+    if simulation_cache is not None:
         sim_for_cache = simulation
         if isinstance(simulation, (ModeSolver, ModeSimulation)) and reduce_simulation:
             sim_for_cache = get_reduced_simulation(simulation, reduce_simulation)
-        entry = cache_instance.try_fetch(
+        entry = simulation_cache.try_fetch(
             simulation=sim_for_cache
         )
         data = _get_simulation_data_from_cache_entry(entry, path)
@@ -1048,10 +1048,10 @@ def load(
         base_dir = os.path.dirname(path) or "."
         path = os.path.join(base_dir, "cm_data.hdf5")
 
-    cache_instance = _resolve_cache(use_cache)
+    simulation_cache = _resolve_cache(use_cache)
     data = None
-    if cache_instance is not None:
-        entry = cache_instance.try_fetch_by_task(
+    if simulation_cache is not None:
+        entry = simulation_cache.try_fetch_by_task(
             task_id=task_id, verbose=verbose
         )
         data = _get_simulation_data_from_cache_entry(entry, path)
@@ -1070,10 +1070,10 @@ def load(
 
     stub_data = Tidy3dStubData.postprocess(path)
 
-    if cache_instance is not None:
+    if simulation_cache is not None:
         info = get_info(task_id, verbose=False)
         workflow_type = getattr(info, "taskType", None) or type(stub_data).__name__
-        cache_instance.store_result(
+        simulation_cache.store_result(
             stub_data=stub_data,
             task_id=task_id,
             path=path,
