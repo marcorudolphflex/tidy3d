@@ -1,6 +1,7 @@
 # autograd wrapper for web functions
 from __future__ import annotations
 
+import traceback
 import typing
 from os.path import dirname
 from pathlib import Path
@@ -21,7 +22,7 @@ from tidy3d.web.api.asynchronous import DEFAULT_DATA_DIR
 from tidy3d.web.api.asynchronous import run_async as run_async_webapi
 from tidy3d.web.api.container import BatchData
 from tidy3d.web.api.tidy3d_stub import Tidy3dStub
-from tidy3d.web.api.run import run as run_webapi, RunInput, RunOutput
+from tidy3d.web.api.run import run as run_webapi, RunInput, RunOutput, _collect_by_hash, _reconstruct_by_hash
 from tidy3d.web.core.types import PayType
 
 from .backward import postprocess_adj as _postprocess_adj_impl
@@ -53,6 +54,7 @@ from .io_utils import (
 from .io_utils import (
     upload_sim_fields_keys as _upload_sim_fields_keys_impl,
 )
+from ..webapi import _modesolver_patch
 
 # if True, will plot the adjoint fields on the plane provided. used for debugging only
 _INSPECT_ADJOINT_FIELDS = False
@@ -99,8 +101,8 @@ def is_valid_for_autograd_async(simulations: dict[str, td.Simulation]) -> bool:
     return True
 
 
-def run(
-    simulation: RunInput,
+def run_single(
+    simulation: WorkflowType,
     task_name: typing.Optional[str] = None,
     folder_name: str = "default",
     path: str = "simulation_data.hdf5",
@@ -117,7 +119,7 @@ def run(
     reduce_simulation: typing.Literal["auto", True, False] = "auto",
     pay_type: typing.Union[PayType, str] = PayType.AUTO,
     priority: typing.Optional[int] = None,
-) -> RunOutput:
+) -> WorkflowDataType:
     """
     Submits a :class:`.Simulation` to server, starts running, monitors progress, downloads,
     and loads results as a :class:`.WorkflowDataType` object.
@@ -267,6 +269,66 @@ def run(
         pay_type=pay_type,
         priority=priority,
     )
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import os
+
+def _safe_task_name(base: typing.Optional[str], h: str, idx: int) -> str:
+    if base:
+        # keep short; suffix with small hash slice for uniqueness
+        return f"{base}-{idx}-{h[:6]}"
+    # delegate to run_single default naming via Tidy3dStub inside run_single
+    return None  # type: ignore[return-value]
+
+def run(
+    simulation: RunInput,
+    task_name: typing.Optional[str] = None,
+    folder_name: str = "default",
+    path_dir: str = "simulation_data.hdf5",
+    callback_url: typing.Optional[str] = None,
+    verbose: bool = True,
+    progress_callback_upload: typing.Optional[typing.Callable[[float], None]] = None,
+    progress_callback_download: typing.Optional[typing.Callable[[float], None]] = None,
+    solver_version: typing.Optional[str] = None,
+    worker_group: typing.Optional[str] = None,
+    simulation_type: str = "tidy3d",
+    parent_tasks: typing.Optional[list[str]] = None,
+    local_gradient: bool = LOCAL_GRADIENT,
+    max_num_adjoint_per_fwd: int = MAX_NUM_ADJOINT_PER_FWD,
+    reduce_simulation: typing.Literal["auto", True, False] = "auto",
+    pay_type: typing.Union[PayType, str] = PayType.AUTO,
+    priority: typing.Optional[int] = None,
+    max_workers: typing.Optional[int] = None,
+) -> RunOutput:
+    h2sim: dict[str, WorkflowType] = _collect_by_hash(simulation)
+    if not h2sim:
+        raise ValueError("No simulation data found in simulation input.")
+
+    batch: BatchData = run_async(
+        simulations=h2sim,  # keys are hashes!
+        folder_name=folder_name,
+        path_dir=path_dir,
+        callback_url=callback_url,
+        num_workers=max_workers,  # pass-through
+        verbose=verbose,
+        simulation_type=simulation_type,
+        solver_version=solver_version,
+        parent_tasks=parent_tasks,
+        local_gradient=local_gradient,
+        max_num_adjoint_per_fwd=max_num_adjoint_per_fwd,
+        reduce_simulation=reduce_simulation,
+        pay_type=pay_type,
+        priority=priority,
+    )
+
+    h2data: dict[str, WorkflowDataType] = {}
+    for h, sim_obj in h2sim.items():
+        sim_data: WorkflowDataType = batch[h]
+        _modesolver_patch(sim_obj, sim_data)
+        h2data[h] = sim_data
+        print(f"type data {type(sim_data)}")
+
+    # Reassemble results back into the original container structure
+    return _reconstruct_by_hash(simulation, h2data)
 
 
 def run_async(
