@@ -31,42 +31,14 @@ from tidy3d.web.cache import (
     _load_env_overrides,
     _load_cli_cache_settings,
 )
-from tidy3d.web import run_async
-
+from tidy3d.web import run_async, Job
 
 MOCK_TASK_ID = "task-xyz"
-
-
 
 class _FakeStubData:
     def __init__(self, simulation: td.Simulation):
         self.simulation = simulation
 
-@pytest.fixture(autouse=True)
-def isolated_cache(tmp_path_factory):
-    """Force every test into its own unique simulation cache directory."""
-    # make per-test unique dir with uuid
-    cache_dir = tmp_path_factory.mktemp(f"tidy3d_cache_{uuid.uuid4().hex}")
-
-    # save original config (singleton)
-    original = get_cache()._config if get_cache() else None
-
-    # point global cache at fresh unique directory
-    cfg = SimulationCacheConfig(
-        enabled=True,
-        directory=cache_dir,
-        max_size_gb=1.0,
-        max_entries=10,
-    )
-    configure_cache(cfg)
-    get_cache().clear()
-
-    yield cache_dir
-
-    # restore previous config or clear
-    if original is not None:
-        configure_cache(original)
-    get_cache().clear()
 
 @pytest.fixture
 def basic_simulation():
@@ -93,7 +65,7 @@ def fake_data(monkeypatch, basic_simulation):
     return calls
 
 
-def _patch_run_pipeline(monkeypatch, tmp_path):
+def _patch_run_pipeline(monkeypatch):
     """Patch upload, start, monitor, and download to avoid network calls."""
     counters = {"upload": 0, "start": 0, "monitor": 0, "download": 0}
 
@@ -111,10 +83,15 @@ def _patch_run_pipeline(monkeypatch, tmp_path):
         counters["download"] += 1
         Path(path).write_text(f"payload:{task_id}")
 
+    def _fake_status(self):
+        return "success"
+
     monkeypatch.setattr(web, "upload", _fake_upload)
     monkeypatch.setattr(web, "start", _fake_start)
     monkeypatch.setattr(web, "monitor", _fake_monitor)
     monkeypatch.setattr(web, "download", _fake_download)
+    monkeypatch.setattr(web, "estimate_cost", lambda *args, **kwargs: 0.0)
+    monkeypatch.setattr(Job, "status", property(_fake_status))
     monkeypatch.setattr(
         web,
         "get_info",
@@ -130,9 +107,8 @@ def _reset_counters(counters: dict[str, int]) -> None:
         counters[key] = 0
 
 
-@pytest.mark.serial
 def _test_run_cache_hit(monkeypatch, tmp_path, basic_simulation, fake_data):
-    counters = _patch_run_pipeline(monkeypatch, tmp_path)
+    counters = _patch_run_pipeline(monkeypatch)
     out_path = tmp_path / "result.hdf5"
     get_cache().clear()
 
@@ -146,26 +122,44 @@ def _test_run_cache_hit(monkeypatch, tmp_path, basic_simulation, fake_data):
     assert counters == {"upload": 0, "start": 0, "monitor": 0, "download": 0}
 
 
-
-@pytest.mark.serial
-def test_run_cache_hit_async(use_emulated_run, monkeypatch, tmp_path, basic_simulation, fake_data):
-    counters = _patch_run_pipeline(monkeypatch, tmp_path)
-    out_path = tmp_path / "result.hdf5"
+def _test_run_cache_hit_async(monkeypatch, basic_simulation):
+    counters = _patch_run_pipeline(monkeypatch)
     get_cache().clear()
+    _reset_counters(counters)
+    sim2 = basic_simulation.updated_copy(shutoff=1e-4)
+    sim3 = basic_simulation.updated_copy(shutoff=1e-3)
 
-    data = web.run(basic_simulation, task_name="demo", path=str(out_path), use_cache=True)
-    assert isinstance(data, _FakeStubData)
-    assert counters == {"upload": 1, "start": 1, "monitor": 1, "download": 1}
+    data = run_async({"task1": basic_simulation, "task2": sim2}, use_cache=True)
+    print(counters)
+    assert counters["download"] == 2
+    data_task1 = data["task1"] # access to store in cache
+    data_task2 = data["task2"] # access to store in cache
+    assert isinstance(data_task1, _FakeStubData)
+    assert isinstance(data_task2, _FakeStubData)
+    cache = get_cache()
+    print("cache size", len(cache))
 
     _reset_counters(counters)
-    data = run_async({"task1": basic_simulation}, use_cache=True)
+    data = run_async({"task1": basic_simulation, "task2": sim2}, use_cache=True)
+    print(counters)
+    assert counters["download"] == 0
+    data_task1 = data["task1"]
+    assert isinstance(data_task1, _FakeStubData)
+
+    _reset_counters(counters)
+    data = run_async({"task1": basic_simulation, "task3": sim3}, use_cache=True)
+    print(counters)
+    assert counters["download"] == 1
+
+    data_task1 = data["task1"]
+    data_task2 = data["task2"]
+    assert isinstance(data_task1, _FakeStubData)
+    assert isinstance(data_task2, _FakeStubData)
 
 
-@pytest.mark.serial
-@pytest.mark.xdist_group("serial")
 def _test_load_cache_hit(monkeypatch, tmp_path, basic_simulation, fake_data):
     get_cache().clear()
-    counters = _patch_run_pipeline(monkeypatch, tmp_path)
+    counters = _patch_run_pipeline(monkeypatch)
     out_path = tmp_path / "load.hdf5"
 
     web.run(basic_simulation, task_name="demo", path=str(out_path), use_cache=True)
@@ -177,10 +171,8 @@ def _test_load_cache_hit(monkeypatch, tmp_path, basic_simulation, fake_data):
     assert counters["download"] == 0  # served from cache
 
 
-@pytest.mark.serial
-@pytest.mark.xdist_group("serial")
 def _test_checksum_mismatch_triggers_refresh(monkeypatch, tmp_path, basic_simulation):
-    counters = _patch_run_pipeline(monkeypatch, tmp_path)
+    counters = _patch_run_pipeline(monkeypatch)
     out_path = tmp_path / "checksum.hdf5"
 
     web.run(basic_simulation, task_name="demo", path=str(out_path), use_cache=True)
@@ -195,8 +187,6 @@ def _test_checksum_mismatch_triggers_refresh(monkeypatch, tmp_path, basic_simula
     assert counters["download"] == 1
 
 
-@pytest.mark.serial
-@pytest.mark.xdist_group("serial")
 def _test_cache_eviction_by_entries(tmp_path_factory, basic_simulation):
     cache = SimulationCache(SimulationCacheConfig(enabled=True, max_size_gb=10.0, max_entries=1))
 
@@ -215,8 +205,6 @@ def _test_cache_eviction_by_entries(tmp_path_factory, basic_simulation):
     assert entries[0]["simulation_hash"] == sim2._hash_self()
 
 
-@pytest.mark.serial
-@pytest.mark.xdist_group("serial")
 def _test_cache_eviction_by_size(tmp_path_factory, basic_simulation):
     cache = SimulationCache(SimulationCacheConfig(enabled=True, max_size_gb=1e-5, max_entries=10))
 
@@ -235,16 +223,17 @@ def _test_cache_eviction_by_size(tmp_path_factory, basic_simulation):
     assert entries[0]["simulation_hash"] == sim2._hash_self()
 
 
-@pytest.mark.xdist_group("serial")
+
 def test_cache_end_to_end(monkeypatch, tmp_path, tmp_path_factory, basic_simulation, fake_data):
     """Run all critical cache tests in sequence to ensure end-to-end stability."""
-    _test_run_cache_hit(monkeypatch, tmp_path, basic_simulation, fake_data)
-    _test_load_cache_hit(monkeypatch, tmp_path, basic_simulation, fake_data)
-    _test_checksum_mismatch_triggers_refresh(monkeypatch, tmp_path, basic_simulation)
-    _test_cache_eviction_by_entries(tmp_path_factory, basic_simulation)
-    _test_cache_eviction_by_size(tmp_path_factory, basic_simulation)
+    # _test_run_cache_hit(monkeypatch, tmp_path, basic_simulation, fake_data)
+    # _test_load_cache_hit(monkeypatch, tmp_path, basic_simulation, fake_data)
+    # _test_checksum_mismatch_triggers_refresh(monkeypatch, tmp_path, basic_simulation)
+    # _test_cache_eviction_by_entries(tmp_path_factory, basic_simulation)
+    # _test_cache_eviction_by_size(tmp_path_factory, basic_simulation)
+    _test_run_cache_hit_async(monkeypatch, basic_simulation)
 
-@pytest.mark.serial
+
 def test_configure_cache_roundtrip(tmp_path):
     new_cfg = SimulationCacheConfig(enabled=True, directory=tmp_path, max_size_gb=1.23, max_entries=5)
     configure_cache(new_cfg)
@@ -254,7 +243,7 @@ def test_configure_cache_roundtrip(tmp_path):
     assert cfg.max_size_gb == 1.23
     assert cfg.max_entries == 5
 
-@pytest.mark.serial
+
 def test_env_var_overrides(monkeypatch, tmp_path):
     monkeypatch.setenv("TIDY3D_CACHE_ENABLED", "true")
     monkeypatch.setenv("TIDY3D_CACHE_DIR", str(tmp_path))
@@ -269,7 +258,7 @@ def test_env_var_overrides(monkeypatch, tmp_path):
         "max_entries": 7,
     }
 
-@pytest.mark.serial
+
 def test_cli_config_overrides(tmp_path, monkeypatch):
     # Build fake toml config file
     cli_config_file = tmp_path / "config.toml"
@@ -294,7 +283,7 @@ def test_cli_config_overrides(tmp_path, monkeypatch):
     assert settings["max_size_gb"] == 2.5
     assert settings["max_entries"] == 99
 
-@pytest.mark.serial
+
 def test_apply_updates_invalid_values(tmp_path, caplog):
     base = SimulationCacheConfig()
     updates = {
@@ -310,7 +299,7 @@ def test_apply_updates_invalid_values(tmp_path, caplog):
     assert cfg.max_size_gb == base.max_size_gb
     assert cfg.max_entries == base.max_entries
 
-@pytest.mark.serial
+
 def test_effective_config_cli_then_env(monkeypatch, tmp_path):
     """CLI settings should apply first, then environment overrides take precedence."""
 

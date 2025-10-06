@@ -155,6 +155,9 @@ def run(
         Which method to pay for the simulation.
     priority: int = None
         Task priority for vGPU queue (1=lowest, 10=highest).
+    use_cache: bool = None
+        Whether to use local cache if identical simulation is rerun. If not provided, cache settings from config or
+        environment variables will be used.
     Returns
     -------
     Union[:class:`.SimulationData`, :class:`.HeatSimulationData`, :class:`.EMESimulationData`, :class:`.ModalComponentModelerData`, :class:`.TerminalComponentModelerData`]
@@ -320,7 +323,7 @@ def run_async(
         Specify the payment method.
         Whether to reduce structures in the simulation to the simulation domain only. Note: currently only implemented for the mode solver.
     use_cache: bool = None
-        Whether to use local cache if identical simulation is rerun. If not provided, cache settings from config or#
+        Whether to use local cache if identical simulation is rerun. If not provided, cache settings from config or
         environment variables will be used.
 
     Returns
@@ -364,6 +367,7 @@ def run_async(
             max_num_adjoint_per_fwd=max_num_adjoint_per_fwd,
             pay_type=pay_type,
             priority=priority,
+            use_cache=use_cache,
         )
 
     return run_async_webapi(
@@ -1312,7 +1316,7 @@ defvjp(_run_async_primitive, _run_async_bwd, argnums=[0])
 
 def parse_run_kwargs(**run_kwargs):
     """Parse the ``run_kwargs`` to extract what should be passed to the ``Job`` initialization."""
-    job_fields = [*list(Job._upload_fields), "solver_version", "pay_type"]
+    job_fields = [*list(Job._upload_fields), "solver_version", "pay_type", "use_cache"]
     job_init_kwargs = {k: v for k, v in run_kwargs.items() if k in job_fields}
     return job_init_kwargs
 
