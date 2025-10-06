@@ -186,7 +186,7 @@ def run(
         Priority of the simulation in the Virtual GPU (vGPU) queue (1 = lowest, 10 = highest).
         It affects only simulations from vGPU licenses and does not impact simulations using FlexCredits.
     use_cache: bool = None
-        Whether to use local cache if identical simulation is rerun. If not provided, cache settings from config or#
+        Whether to use local cache if identical simulation is rerun. If not provided, cache settings from config or
         environment variables will be used.
     Returns
     -------
@@ -1051,7 +1051,7 @@ def load(
     progress_callback : Callable[[float], None] = None
         Optional callback function called when downloading file with ``bytes_in_chunk`` as argument.
     use_cache: bool = None
-        Whether to use local cache if identical simulation is rerun. If not provided, cache settings from config or#
+        Whether to use local cache if identical simulation is rerun. If not provided, cache settings from config or
         environment variables will be used.
     lazy : bool = False
         Whether to load the actual data (``lazy=False``) or return a proxy that loads
@@ -1098,6 +1098,7 @@ def load(
             path=path,
             workflow_type=workflow_type,
         )
+        print("STORED", task_id)
 
     return stub_data
 

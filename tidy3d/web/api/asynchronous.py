@@ -58,7 +58,7 @@ def run_async(
         Priority of the simulation in the Virtual GPU (vGPU) queue (1 = lowest, 10 = highest).
         It affects only simulations from vGPU licenses and does not impact simulations using FlexCredits.
     use_cache: bool = None
-        Whether to use local cache if identical simulation is rerun. If not provided, cache settings from config or#
+        Whether to use local cache if identical simulation is rerun. If not provided, cache settings from config or
         environment variables will be used.
 
     Returns

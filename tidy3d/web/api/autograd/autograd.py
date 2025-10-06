@@ -159,6 +159,9 @@ def run(
         Which method to pay for the simulation.
     priority: int = None
         Task priority for vGPU queue (1=lowest, 10=highest).
+    use_cache: bool = None
+        Whether to use local cache if identical simulation is rerun. If not provided, cache settings from config or
+        environment variables will be used.
     Returns
     -------
     Union[:class:`.SimulationData`, :class:`.HeatSimulationData`, :class:`.EMESimulationData`, :class:`.ModalComponentModelerData`, :class:`.TerminalComponentModelerData`]
@@ -324,7 +327,7 @@ def run_async(
         Specify the payment method.
         Whether to reduce structures in the simulation to the simulation domain only. Note: currently only implemented for the mode solver.
     use_cache: bool = None
-        Whether to use local cache if identical simulation is rerun. If not provided, cache settings from config or#
+        Whether to use local cache if identical simulation is rerun. If not provided, cache settings from config or
         environment variables will be used.
 
     Returns
@@ -368,6 +371,7 @@ def run_async(
             max_num_adjoint_per_fwd=max_num_adjoint_per_fwd,
             pay_type=pay_type,
             priority=priority,
+            use_cache=use_cache,
         )
 
     return run_async_webapi(
