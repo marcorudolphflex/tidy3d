@@ -7,6 +7,7 @@ import os
 import random
 import shutil
 import time
+import uuid
 from abc import ABC
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -268,7 +269,7 @@ class Job(WebContainer):
             if isinstance(self.simulation, (ModeSolver, ModeSimulation)) and self.reduce_simulation:
                 sim_for_cache = get_reduced_simulation(self.simulation, self.reduce_simulation)
             entry = simulation_cache.try_fetch(
-                simulation=sim_for_cache,
+                simulation=sim_for_cache, register_if_found=True
             )
             return entry
         return None
@@ -325,23 +326,13 @@ class Job(WebContainer):
     @cached_property
     def load_if_cached(
         self
-    ) -> Optional[str]:
-        """Run :class:`Job` all the way through and return data.
+    ) -> bool:
+        """Checks if data is already cached.
 
-        Parameters
-        ----------
-        path : str = "./simulation_data.hdf5"
-            Path to download results file (.hdf5), including filename.
-        priority: int = None
-            Priority of the simulation in the Virtual GPU (vGPU) queue (1 = lowest, 10 = highest).
-            It affects only simulations from vGPU licenses and does not impact simulations using FlexCredits.
-        use_cache: bool = None
-            Override cache usage behaviour for this call. ``True`` forces cache usage when available,
-            ``False`` bypasses it, and ``None`` defers to configuration and environment settings.
         Returns
         -------
-        :class:`WorkflowDataType`
-            Object containing simulation results.
+        bool
+            Whether item was found in cache.
         """
         path = self.data_cache_path
         self._check_path_dir(path=path)
@@ -352,16 +343,14 @@ class Job(WebContainer):
                 entry = self.get_cache_hit_entry()
                 if entry is not None:
                     entry.materialize(Path(path))
-                    print(f"{self.task_name} found in cache")
-                    return path
-        print(f"{self.task_name} not found in cache")
-        return None
+                    return True
+        return False
 
     @cached_property
     def task_id(self) -> TaskId:
         """The task ID for this ``Job``. Uploads the ``Job`` if it hasn't already been uploaded."""
         if self.load_if_cached:
-            return "cached_" + self.task_name
+            return "cached_" + self.task_name + "_" + str(uuid.uuid4())
         if self.task_id_cached:
             return self.task_id_cached
         self._check_folder(self.folder_name)
@@ -813,7 +802,6 @@ class Batch(WebContainer):
         for task_name, job in jobs.items():
             loaded.append(job.load_if_cached)
         if all([l is not None for l in loaded]): # if all results were found in cache
-            print("ALL CACHED")
             return self.load(path_dir=path_dir)
 
         self._check_path_dir(path_dir)
