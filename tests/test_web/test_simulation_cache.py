@@ -34,6 +34,15 @@ from tidy3d.web.cache import (
 from tidy3d.web import run_async, Job
 
 MOCK_TASK_ID = "task-xyz"
+# --- Fake pipeline global maps / queue ---
+TASK_TO_SIM: dict[str, td.Simulation] = {}        # task_id -> Simulation
+PATH_TO_SIM: dict[str, td.Simulation] = {}        # artifact path -> Simulation
+SIM_ORDER: list[td.Simulation] = []               # fallback queue when upload isn't called
+
+def _reset_fake_maps():
+    TASK_TO_SIM.clear()
+    PATH_TO_SIM.clear()
+    SIM_ORDER.clear()
 
 class _FakeStubData:
     def __init__(self, simulation: td.Simulation):
@@ -54,24 +63,61 @@ def basic_simulation():
 
 @pytest.fixture(autouse=True)
 def fake_data(monkeypatch, basic_simulation):
-    """Patch postprocess to return predictable stub data and track invocations."""
+    """Patch postprocess to return stub data bound to the correct simulation."""
     calls = {"postprocess": 0}
 
     def _fake_postprocess(path: str):
         calls["postprocess"] += 1
-        return _FakeStubData(basic_simulation)
+        p = Path(path)
+        sim = PATH_TO_SIM.get(str(p))
+        if sim is None:
+            # Try to recover task_id from file payload written by _fake_download
+            try:
+                txt = p.read_text()
+                if "payload:" in txt:
+                    task_id = txt.split("payload:", 1)[1].strip()
+                    sim = TASK_TO_SIM.get(task_id)
+            except Exception:
+                pass
+        if sim is None:
+            # Last-resort fallback (keeps tests from crashing even if mapping failed)
+            sim = basic_simulation
+        return _FakeStubData(sim)
 
     monkeypatch.setattr(web.Tidy3dStubData, "postprocess", staticmethod(_fake_postprocess))
     return calls
 
-
 def _patch_run_pipeline(monkeypatch):
-    """Patch upload, start, monitor, and download to avoid network calls."""
+    """Patch upload, start, monitor, and download to avoid network calls and map sims."""
     counters = {"upload": 0, "start": 0, "monitor": 0, "download": 0}
+    _reset_fake_maps()  # isolate between tests
+
+    def _extract_simulation(kwargs):
+        """Extract the first td.Simulation object from upload kwargs."""
+        if "simulation" in kwargs and isinstance(kwargs["simulation"], td.Simulation):
+            return kwargs["simulation"]
+        if "simulations" in kwargs:
+            sims = kwargs["simulations"]
+            if isinstance(sims, dict):
+                for sim in sims.values():
+                    if isinstance(sim, td.Simulation):
+                        return sim
+            elif isinstance(sims, (list, tuple)):
+                for sim in sims:
+                    if isinstance(sim, td.Simulation):
+                        return sim
+        return None
 
     def _fake_upload(**kwargs):
         counters["upload"] += 1
-        return MOCK_TASK_ID
+        task_id = f"{MOCK_TASK_ID}{counters['upload']}"
+        sim = _extract_simulation(kwargs)
+        if sim is None and SIM_ORDER:
+            # Upload wasn't given the sim (or async path differs) -> fallback
+            sim = SIM_ORDER.pop(0)
+        if sim is not None:
+            TASK_TO_SIM[task_id] = sim
+        return task_id
 
     def _fake_start(task_id, **kwargs):
         counters["start"] += 1
@@ -81,7 +127,14 @@ def _patch_run_pipeline(monkeypatch):
 
     def _fake_download(*, task_id, path, **kwargs):
         counters["download"] += 1
+        # Ensure we have a simulation for this task id (even if upload wasn't called)
+        sim = TASK_TO_SIM.get(task_id)
+        if sim is None and SIM_ORDER:
+            sim = SIM_ORDER.pop(0)
+            TASK_TO_SIM[task_id] = sim
         Path(path).write_text(f"payload:{task_id}")
+        if sim is not None:
+            PATH_TO_SIM[str(Path(path))] = sim
 
     def _fake_status(self):
         return "success"
@@ -100,7 +153,6 @@ def _patch_run_pipeline(monkeypatch):
         )(),
     )
     return counters
-
 
 def _reset_counters(counters: dict[str, int]) -> None:
     for key in counters:
@@ -128,6 +180,7 @@ def _test_run_cache_hit_async(monkeypatch, basic_simulation):
     _reset_counters(counters)
     sim2 = basic_simulation.updated_copy(shutoff=1e-4)
     sim3 = basic_simulation.updated_copy(shutoff=1e-3)
+    SIM_ORDER[:] = [basic_simulation, sim2, sim3]
 
     data = run_async({"task1": basic_simulation, "task2": sim2}, use_cache=True)
     print(counters)
@@ -147,7 +200,7 @@ def _test_run_cache_hit_async(monkeypatch, basic_simulation):
     assert isinstance(data_task1, _FakeStubData)
 
     _reset_counters(counters)
-    data = run_async({"task1": basic_simulation, "task3": sim3}, use_cache=True)
+    data = run_async({"task1": basic_simulation, "task2": sim3}, use_cache=True)
     print(counters)
     assert counters["download"] == 1
 
@@ -166,7 +219,7 @@ def _test_load_cache_hit(monkeypatch, tmp_path, basic_simulation, fake_data):
     assert counters["download"] == 1
 
     _reset_counters(counters)
-    data = web.load(MOCK_TASK_ID, path=str(out_path), use_cache=True)
+    data = web.load(MOCK_TASK_ID + "1", path=str(out_path), use_cache=True)
     assert isinstance(data, _FakeStubData)
     assert counters["download"] == 0  # served from cache
 
@@ -183,7 +236,7 @@ def _test_checksum_mismatch_triggers_refresh(monkeypatch, tmp_path, basic_simula
     corrupted_path.write_text("corrupted")
 
     _reset_counters(counters)
-    web.load(MOCK_TASK_ID, path=str(out_path), use_cache=True)
+    web.load(MOCK_TASK_ID + "1", path=str(out_path), use_cache=True)
     assert counters["download"] == 1
 
 
@@ -195,7 +248,7 @@ def _test_cache_eviction_by_entries(tmp_path_factory, basic_simulation):
     cache.store_result(_FakeStubData(basic_simulation), MOCK_TASK_ID, str(file1), "FDTD")
     assert len(cache) == 1
 
-    sim2 = basic_simulation.updated_copy(normalize_index=0.1)
+    sim2 = basic_simulation.updated_copy(shutoff=1e-4)
     file2 = tmp_path_factory.mktemp("art2") / CACHE_ARTIFACT_NAME
     file2.write_text("b" * 10)
     cache.store_result(_FakeStubData(sim2), MOCK_TASK_ID, str(file2), "FDTD")
@@ -213,7 +266,7 @@ def _test_cache_eviction_by_size(tmp_path_factory, basic_simulation):
     cache.store_result(_FakeStubData(basic_simulation), MOCK_TASK_ID, str(file1), "FDTD")
     assert len(cache) == 1
 
-    sim2 = basic_simulation.updated_copy(normalize_index=0.2)
+    sim2 = basic_simulation.updated_copy(shutoff=1e-4)
     file2 = tmp_path_factory.mktemp("art2") / CACHE_ARTIFACT_NAME
     file2.write_text("b" * 12_000)
     cache.store_result(_FakeStubData(sim2), MOCK_TASK_ID, str(file2), "FDTD")
