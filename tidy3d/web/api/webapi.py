@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 import time
+from pathlib import Path
 from typing import Callable, Literal, Optional, Union
 
 from requests import HTTPError
@@ -25,6 +26,7 @@ from tidy3d.web.api.states import (
     POST_VALIDATE_STATES,
     STATE_PROGRESS_PERCENTAGE,
 )
+from tidy3d.web.cache import CacheEntry, resolve_simulation_cache
 from tidy3d.web.core.account import Account
 from tidy3d.web.core.constants import (
     CM_DATA_HDF5_GZ,
@@ -312,6 +314,16 @@ def _task_dict_to_url_bullet_list(data_dict: dict) -> str:
     return "\n".join([f"- {key}: '{value}'" for key, value in data_dict.items()])
 
 
+def _get_simulation_data_from_cache_entry(entry: CacheEntry, path: str) -> bool:
+    if entry is not None:
+        try:
+            entry.materialize(Path(path))
+            return True
+        except Exception:
+            return False
+    return False
+
+
 @wait_for_connection
 def run(
     simulation: WorkflowType,
@@ -330,6 +342,7 @@ def run(
     pay_type: Union[PayType, str] = PayType.AUTO,
     priority: Optional[int] = None,
     lazy: bool = False,
+    use_cache: Optional[bool] = None,
 ) -> WorkflowDataType:
     """
     Submits a :class:`.Simulation` to server, starts running, monitors progress, downloads,
@@ -370,6 +383,9 @@ def run(
     lazy : bool = False
         Whether to load the actual data (``lazy=False``) or return a proxy that loads
         the data when accessed (``lazy=True``).
+    use_cache: Optional[bool] = None
+        Whether to use local cache if identical simulation is rerun. If not provided, cache settings from config or
+        environment variables will be used.
 
     Returns
     -------
@@ -415,34 +431,50 @@ def run(
     :meth:`tidy3d.web.api.container.Batch.monitor`
         Monitor progress of each of the running tasks.
     """
-    task_id = upload(
-        simulation=simulation,
-        task_name=task_name,
-        folder_name=folder_name,
-        callback_url=callback_url,
-        verbose=verbose,
-        progress_callback=progress_callback_upload,
-        simulation_type=simulation_type,
-        parent_tasks=parent_tasks,
-        solver_version=solver_version,
-        reduce_simulation=reduce_simulation,
-    )
-    start(
-        task_id,
-        verbose=verbose,
-        solver_version=solver_version,
-        worker_group=worker_group,
-        pay_type=pay_type,
-        priority=priority,
-    )
-    monitor(task_id, verbose=verbose)
+    simulation_cache = resolve_simulation_cache(use_cache)
+    loaded_from_cache = False
+    if simulation_cache is not None:
+        sim_for_cache = simulation
+        if isinstance(simulation, (ModeSolver, ModeSimulation)):
+            sim_for_cache = get_reduced_simulation(simulation, reduce_simulation)
+        entry = simulation_cache.try_fetch(simulation=sim_for_cache)
+        loaded_from_cache = _get_simulation_data_from_cache_entry(entry, path)
+
+    if not loaded_from_cache:
+        task_id = upload(
+            simulation=simulation,
+            task_name=task_name,
+            folder_name=folder_name,
+            callback_url=callback_url,
+            verbose=verbose,
+            progress_callback=progress_callback_upload,
+            simulation_type=simulation_type,
+            parent_tasks=parent_tasks,
+            solver_version=solver_version,
+            reduce_simulation=reduce_simulation,
+        )
+        start(
+            task_id,
+            verbose=verbose,
+            solver_version=solver_version,
+            worker_group=worker_group,
+            pay_type=pay_type,
+            priority=priority,
+        )
+        monitor(task_id, verbose=verbose)
+    else:
+        task_id = None
+
     data = load(
         task_id=task_id,
         path=path,
         verbose=verbose,
         progress_callback=progress_callback_download,
+        use_cache=use_cache,
+        from_cache=loaded_from_cache,
         lazy=lazy,
     )
+
     if isinstance(simulation, ModeSolver):
         simulation._patch_data(data=data)
     return data
@@ -1194,11 +1226,13 @@ def download_log(
 
 @wait_for_connection
 def load(
-    task_id: TaskId,
+    task_id: Optional[TaskId],
     path: str = "simulation_data.hdf5",
     replace_existing: bool = True,
     verbose: bool = True,
     progress_callback: Optional[Callable[[float], None]] = None,
+    use_cache: Optional[bool] = False,
+    from_cache: bool = False,
     lazy: bool = False,
 ) -> WorkflowDataType:
     """
@@ -1229,6 +1263,11 @@ def load(
         If ``True``, will print progressbars and status, otherwise, will run silently.
     progress_callback : Callable[[float], None] = None
         Optional callback function called when downloading file with ``bytes_in_chunk`` as argument.
+    use_cache: Optional[bool] = None
+        Whether to use local cache if identical simulation is rerun. If not provided, cache settings from config or
+        environment variables will be used.
+    from_cache: bool = None
+        Whether data will be loaded from cache.
     lazy : bool = False
         Whether to load the actual data (``lazy=False``) or return a proxy that loads
         the data when accessed (``lazy=True``).
@@ -1238,25 +1277,44 @@ def load(
     Union[:class:`.SimulationData`, :class:`.HeatSimulationData`, :class:`.EMESimulationData`]
         Object containing simulation data.
     """
-    # For component modeler batches, default to a clearer filename if the default was used.
-    if _is_modeler_batch(task_id):
-        base_dir = os.path.dirname(path) or "."
-        if os.path.basename(path) == "simulation_data.hdf5":
-            path = os.path.join(base_dir, "cm_data.hdf5")
-        elif os.path.basename(path) == "simulation_data.hdf5.gz":
-            path = os.path.join(base_dir, "cm_data.hdf5.gz")
+    assert from_cache or task_id, "Either task_id or from_cache must be provided."
 
-    if not os.path.exists(path) or replace_existing:
+    # For component modeler batches, default to a clearer filename if the default was used.
+    if (
+        not from_cache
+        and _is_modeler_batch(task_id)
+        and os.path.basename(path) == "simulation_data.hdf5"
+    ):
+        base_dir = os.path.dirname(path) or "."
+        if os.path.basename(path) in {"simulation_data.hdf5", "simulation_data.hdf5.gz"}:
+            path = os.path.join(base_dir, os.path.basename(path).replace("simulation", "cm"))
+
+    if from_cache:
+        if not os.path.exists(path):
+            raise FileNotFoundError("Cached file not found.")
+    elif not os.path.exists(path) or replace_existing:
         download(task_id=task_id, path=path, verbose=verbose, progress_callback=progress_callback)
 
     if verbose:
         console = get_logging_console()
-        if _is_modeler_batch(task_id):
+        if not from_cache and _is_modeler_batch(task_id):  # TODO inspect
             console.log(f"loading component modeler data from {path}")
         else:
             console.log(f"loading simulation from {path}")
 
     stub_data = Tidy3dStubData.postprocess(path, lazy=lazy)
+
+    simulation_cache = resolve_simulation_cache(use_cache)
+    if simulation_cache is not None and not from_cache:
+        info = get_info(task_id, verbose=False)
+        workflow_type = getattr(info, "taskType", None) or type(stub_data).__name__
+        simulation_cache.store_result(
+            stub_data=stub_data,
+            task_id=task_id,
+            path=path,
+            workflow_type=workflow_type,
+        )
+
     return stub_data
 
 

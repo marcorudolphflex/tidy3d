@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import concurrent
 import os
+import shutil
 import time
+import uuid
 from abc import ABC
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -15,6 +17,7 @@ from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn, T
 
 from tidy3d.components.base import Tidy3dBaseModel, cached_property
 from tidy3d.components.mode.mode_solver import ModeSolver
+from tidy3d.components.mode.simulation import ModeSimulation
 from tidy3d.components.types import annotate_type
 from tidy3d.components.types.workflow import WorkflowDataType, WorkflowType
 from tidy3d.exceptions import DataError
@@ -31,6 +34,9 @@ from tidy3d.web.api.states import (
     STATE_PROGRESS_PERCENTAGE,
 )
 from tidy3d.web.api.tidy3d_stub import Tidy3dStub
+from tidy3d.web.api.tidy3d_stub import Tidy3dStub, Tidy3dStubData
+from tidy3d.web.api.webapi import _get_simulation_data_from_cache_entry, get_reduced_simulation
+from tidy3d.web.cache import TMP_BATCH_PREFIX, CacheEntry, resolve_simulation_cache
 from tidy3d.web.core.constants import TaskId, TaskName
 from tidy3d.web.core.task_core import Folder
 from tidy3d.web.core.task_info import RunInfo, TaskInfo
@@ -228,6 +234,12 @@ class Job(WebContainer):
         description="Whether to load the actual data (lazy=False) or return a proxy that loads the data when accessed (lazy=True).",
     )
 
+    data_cache_path: str | None = pd.Field(
+        None,
+        title="Data Cache Path",
+        description="File where cache is copied to.",
+    )
+
     _upload_fields = (
         "simulation",
         "task_name",
@@ -238,6 +250,14 @@ class Job(WebContainer):
         "parent_tasks",
         "solver_version",
         "reduce_simulation",
+    )
+
+    _cache_file_moved = False
+
+    use_cache: Optional[bool] = pd.Field(
+        None,
+        title="Use Cache",
+        description="Whether to use local cache for retrieving Simulation results.",
     )
 
     def to_file(self, fname: str) -> None:
@@ -256,8 +276,20 @@ class Job(WebContainer):
         self = self.updated_copy(task_id_cached=task_id_cached)
         super(Job, self).to_file(fname=fname)  # noqa: UP008
 
+    def get_cache_hit_entry(self) -> Optional[CacheEntry]:
+        simulation_cache = resolve_simulation_cache(self.use_cache)
+        if simulation_cache is not None:
+            sim_for_cache = self.simulation
+            if isinstance(self.simulation, (ModeSolver, ModeSimulation)):
+                sim_for_cache = get_reduced_simulation(self.simulation, self.reduce_simulation)
+            entry = simulation_cache.try_fetch(simulation=sim_for_cache)
+            return entry
+        return None
+
     def run(
-        self, path: str = DEFAULT_DATA_PATH, priority: Optional[int] = None
+        self,
+        path: str = DEFAULT_DATA_PATH,
+        priority: Optional[int] = None,
     ) -> WorkflowDataType:
         """Run :class:`Job` all the way through and return data.
 
@@ -268,22 +300,62 @@ class Job(WebContainer):
         priority: int = None
             Priority of the simulation in the Virtual GPU (vGPU) queue (1 = lowest, 10 = highest).
             It affects only simulations from vGPU licenses and does not impact simulations using FlexCredits.
+        use_cache: Optional[bool] = None
+            Override cache usage behaviour for this call. ``True`` forces cache usage when available,
+            ``False`` bypasses it, and ``None`` defers to configuration and environment settings.
         Returns
         -------
         :class:`WorkflowDataType`
             Object containing simulation results.
         """
-        self.upload()
-        if priority is None:
-            self.start()
-        else:
-            self.start(priority=priority)
-        self.monitor()
-        return self.load(path=path)
+        self._check_path_dir(path=path)
+
+        loaded_from_cache = self.load_if_cached
+        if not loaded_from_cache:
+            self.upload()
+            if priority is None:
+                self.start()
+            else:
+                self.start(priority=priority)
+            self.monitor()
+        data = self.load(path=path)
+
+        return data
+
+    @cached_property
+    def data_cache_path(self) -> Optional[str]:
+        "Temporary path where cached results are stored."
+        cache = resolve_simulation_cache(self.use_cache)
+        if cache is not None:
+            path = os.path.join(cache._root, TMP_BATCH_PREFIX, f"{self.task_name}.hdf5")
+            return path
+        return None
+
+    @cached_property
+    def load_if_cached(self) -> bool:
+        """Checks if data is already cached.
+
+        Returns
+        -------
+        bool
+            Whether item was found in cache.
+        """
+        path = self.data_cache_path
+        if path is None:
+            return False
+        self._check_path_dir(path=path)
+        entry = self.get_cache_hit_entry()
+        if entry is not None:
+            loaded_from_cache = _get_simulation_data_from_cache_entry(entry, path)
+            if loaded_from_cache:
+                return True
+        return False
 
     @cached_property
     def task_id(self) -> TaskId:
         """The task ID for this ``Job``. Uploads the ``Job`` if it hasn't already been uploaded."""
+        if self.load_if_cached:
+            return "cached_" + self.task_name + "_" + str(uuid.uuid4())
         if self.task_id_cached:
             return self.task_id_cached
         self._check_folder(self.folder_name)
@@ -297,7 +369,9 @@ class Job(WebContainer):
         return task_id
 
     def upload(self) -> None:
-        """Upload this ``Job``."""
+        """Upload this ``Job`` if not already got cached results."""
+        if self.load_if_cached:
+            return
         _ = self.task_id
 
     def get_info(self) -> TaskInfo:
@@ -313,6 +387,8 @@ class Job(WebContainer):
     @property
     def status(self):
         """Return current status of :class:`Job`."""
+        if self.load_if_cached:
+            return "success"
         if web._is_modeler_batch(self.task_id):
             detail = self.get_info()
             status = detail.totalStatus.value
@@ -345,13 +421,16 @@ class Job(WebContainer):
         Note
         ----
         To monitor progress of the :class:`Job`, call :meth:`Job.monitor` after started.
+        Function has no effect if cache is enabled and data was found in cache.
         """
-        web.start(
-            self.task_id,
-            solver_version=self.solver_version,
-            pay_type=self.pay_type,
-            priority=priority,
-        )
+        loaded = self.load_if_cached
+        if not loaded:
+            web.start(
+                self.task_id,
+                solver_version=self.solver_version,
+                pay_type=self.pay_type,
+                priority=priority,
+            )
 
     def get_run_info(self) -> RunInfo:
         """Return information about the running :class:`Job`.
@@ -371,6 +450,8 @@ class Job(WebContainer):
         To load the output of completed simulation into :class:`.SimulationData` objects,
         call :meth:`Job.load`.
         """
+        if self.load_if_cached:
+            return
         web.monitor(self.task_id, verbose=self.verbose)
 
     def download(self, path: str = DEFAULT_DATA_PATH) -> None:
@@ -380,13 +461,28 @@ class Job(WebContainer):
         ----------
         path : str = "./simulation_data.hdf5"
             Path to download data as ``.hdf5`` file (including filename).
+        use_cache: Optional[bool] = None
+            Override cache usage behaviour for this call. ``True`` forces cache usage when available,
+            ``False`` bypasses it, and ``None`` defers to configuration and environment settings.
 
         Note
         ----
         To load the data after download, use :meth:`Job.load`.
         """
+        if self.load_if_cached:
+            self.move_cache_file(path=path)
+            return
         self._check_path_dir(path=path)
         web.download(task_id=self.task_id, path=path, verbose=self.verbose)
+
+    def move_cache_file(self, path: str) -> None:
+        if self._cache_file_moved:
+            return
+        if os.path.exists(self.data_cache_path):
+            shutil.move(self.data_cache_path, path)
+            self._cache_file_moved = True
+        else:
+            raise FileNotFoundError(f"Cached file does not longer exist in {path}.")
 
     def load(self, path: str = DEFAULT_DATA_PATH) -> WorkflowDataType:
         """Download job results and load them into a data object.
@@ -395,14 +491,27 @@ class Job(WebContainer):
         ----------
         path : str = "./simulation_data.hdf5"
             Path to download data as ``.hdf5`` file (including filename).
+        use_cache: Optional[bool] = None
+            Whether to use local cache if identical simulation is rerun. If not provided, cache settings from config or
+            environment variables will be used.
 
         Returns
         -------
         Union[:class:`.SimulationData`, :class:`.HeatSimulationData`, :class:`.EMESimulationData`]
             Object containing simulation results.
         """
+        if self.load_if_cached:
+            self.move_cache_file(path=path)
+            data = Tidy3dStubData.postprocess(path)
+            return data
         self._check_path_dir(path=path)
-        data = web.load(task_id=self.task_id, path=path, verbose=self.verbose, lazy=self.lazy)
+        data = web.load(
+            task_id=self.task_id,
+            path=path,
+            verbose=self.verbose,
+            use_cache=self.use_cache,
+            lazy=self.lazy
+        )
         if isinstance(self.simulation, ModeSolver):
             self.simulation._patch_data(data=data)
         return data
@@ -444,6 +553,8 @@ class Job(WebContainer):
         Cost is calculated assuming the simulation runs for
         the full ``run_time``. If early shut-off is triggered, the cost is adjusted proportionately.
         """
+        if self.load_if_cached:
+            return 0.0
         return web.estimate_cost(self.task_id, verbose=verbose, solver_version=self.solver_version)
 
     def postprocess_start(self, worker_group: Optional[str] = None, verbose: bool = True) -> None:
@@ -540,6 +651,17 @@ class BatchData(Tidy3dBaseModel, Mapping):
     verbose: bool = pd.Field(
         True, title="Verbose", description="Whether to print info messages and progressbars."
     )
+    cached_tasks: Optional[dict[TaskName, bool]] = pd.Field(
+        None,
+        title="Cached Tasks",
+        description="Whether the data of a task came from the cache.",
+    )
+
+    use_cache: Optional[bool] = pd.Field(
+        None,
+        title="Use Cache",
+        description="Whether to use local cache for retrieving Simulation results.",
+    )
 
     lazy: bool = pd.Field(
         False,
@@ -551,9 +673,18 @@ class BatchData(Tidy3dBaseModel, Mapping):
         """Load a simulation data object from file by task name."""
         task_data_path = self.task_paths[task_name]
         task_id = self.task_ids[task_name]
+        from_cache = self.cached_tasks[task_name] if self.cached_tasks else False
         web.get_info(task_id)
 
-        return web.load(task_id=task_id, path=task_data_path, verbose=False, lazy=self.lazy)
+        return web.load(
+            task_id=task_id,
+            path=task_data_path,
+            verbose=False,
+            from_cache=from_cache,
+            use_cache=self.use_cache,
+            replace_existing=False,
+            lazy=self.lazy
+        )
 
     def __getitem__(self, task_name: TaskName) -> WorkflowDataType:
         """Get the simulation data object for a given ``task_name``."""
@@ -699,6 +830,12 @@ class Batch(WebContainer):
         description="Whether to load the actual data (lazy=False) or return a proxy that loads the data when accessed (lazy=True).",
     )
 
+    use_cache: Optional[bool] = pd.Field(
+        None,
+        title="Use Cache",
+        description="Whether to use local cache for retrieving Simulation results.",
+    )
+
     _job_type = Job
 
     def run(
@@ -735,14 +872,16 @@ class Batch(WebContainer):
         rather it iterates over the task names and loads the corresponding
         data from file one by one. If no file exists for that task, it downloads it.
         """
+        loaded = [job.load_if_cached for job in self.jobs.values()]
         self._check_path_dir(path_dir)
-        self.upload()
-        self.to_file(self._batch_path(path_dir=path_dir))
-        if priority is None:
-            self.start()
-        else:
-            self.start(priority=priority)
-        self.monitor(path_dir=path_dir, download_on_success=True)
+        if not all(loaded):
+            self.upload()
+            self.to_file(self._batch_path(path_dir=path_dir))
+            if priority is None:
+                self.start()
+            else:
+                self.start(priority=priority)
+            self.monitor(path_dir=path_dir, download_on_success=True)
         return self.load(path_dir=path_dir, skip_download=True)
 
     @cached_property
@@ -784,6 +923,7 @@ class Batch(WebContainer):
             job_kwargs["solver_version"] = self.solver_version
             job_kwargs["pay_type"] = self.pay_type
             job_kwargs["reduce_simulation"] = self.reduce_simulation
+            job_kwargs["use_cache"] = self.use_cache
             if self.parent_tasks and task_name in self.parent_tasks:
                 job_kwargs["parent_tasks"] = self.parent_tasks[task_name]
             job = JobType(**job_kwargs)
@@ -1269,8 +1409,14 @@ class Batch(WebContainer):
             task_paths[task_name] = self._job_data_path(task_id=job.task_id, path_dir=path_dir)
             task_ids[task_name] = self.jobs[task_name].task_id
 
+        loaded = {task_name: job.load_if_cached for task_name, job in self.jobs.items()}
         data = BatchData(
-            task_paths=task_paths, task_ids=task_ids, verbose=self.verbose, lazy=self.lazy
+            task_paths=task_paths,
+            task_ids=task_ids,
+            verbose=self.verbose,
+            cached_tasks=loaded,
+            use_cache=self.use_cache,
+            lazy=self.lazy
         )
 
         for task_name, job in self.jobs.items():
