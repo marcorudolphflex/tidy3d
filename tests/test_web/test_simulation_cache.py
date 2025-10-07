@@ -6,7 +6,7 @@ import pytest
 
 import tidy3d as td
 from tidy3d import config
-from tidy3d.web import Job, run_async, common
+from tidy3d.web import Job, common, run_async
 from tidy3d.web.api import webapi as web
 from tidy3d.web.api.container import WebContainer
 from tidy3d.web.cache import (
