@@ -1,33 +1,31 @@
 from __future__ import annotations
 
-import uuid
-from pathlib import Path
-
-import tidy3d as td
-from tests.test_plugins.test_adjoint import use_emulated_run
-from tests.utils import run_emulated
-from tidy3d import config
-from tidy3d.web.api import webapi as web
-from tidy3d.web.cache import (
-    CACHE_ARTIFACT_NAME,
-    get_cache, resolve_simulation_cache,
-)
 from pathlib import Path
 
 import pytest
 
-from tidy3d.web import run_async, Job
+import tidy3d as td
+from tidy3d import config
+from tidy3d.web import Job, run_async
+from tidy3d.web.api import webapi as web
+from tidy3d.web.cache import (
+    CACHE_ARTIFACT_NAME,
+    get_cache,
+    resolve_simulation_cache,
+)
 
 MOCK_TASK_ID = "task-xyz"
 # --- Fake pipeline global maps / queue ---
-TASK_TO_SIM: dict[str, td.Simulation] = {}        # task_id -> Simulation
-PATH_TO_SIM: dict[str, td.Simulation] = {}        # artifact path -> Simulation
-SIM_ORDER: list[td.Simulation] = []               # fallback queue when upload isn't called
+TASK_TO_SIM: dict[str, td.Simulation] = {}  # task_id -> Simulation
+PATH_TO_SIM: dict[str, td.Simulation] = {}  # artifact path -> Simulation
+SIM_ORDER: list[td.Simulation] = []  # fallback queue when upload isn't called
+
 
 def _reset_fake_maps():
     TASK_TO_SIM.clear()
     PATH_TO_SIM.clear()
     SIM_ORDER.clear()
+
 
 class _FakeStubData:
     def __init__(self, simulation: td.Simulation):
@@ -51,7 +49,7 @@ def fake_data(monkeypatch, basic_simulation):
     """Patch postprocess to return stub data bound to the correct simulation."""
     calls = {"postprocess": 0}
 
-    def _fake_postprocess(path: str):
+    def _fake_postprocess(path: str, lazy: bool = False):
         calls["postprocess"] += 1
         p = Path(path)
         sim = PATH_TO_SIM.get(str(p))
@@ -71,6 +69,7 @@ def fake_data(monkeypatch, basic_simulation):
 
     monkeypatch.setattr(web.Tidy3dStubData, "postprocess", staticmethod(_fake_postprocess))
     return calls
+
 
 def _patch_run_pipeline(monkeypatch):
     """Patch upload, start, monitor, and download to avoid network calls and map sims."""
@@ -139,6 +138,7 @@ def _patch_run_pipeline(monkeypatch):
     )
     return counters
 
+
 def _reset_counters(counters: dict[str, int]) -> None:
     for key in counters:
         counters[key] = 0
@@ -161,21 +161,23 @@ def _test_run_cache_hit(monkeypatch, tmp_path, basic_simulation, fake_data):
 
 def _test_run_cache_hit_async(monkeypatch, basic_simulation):
     counters = _patch_run_pipeline(monkeypatch)
+    monkeypatch.setattr(config.simulation_cache, "max_entries", 128)
+    monkeypatch.setattr(config.simulation_cache, "max_size_gb", 10)
     cache = resolve_simulation_cache(use_cache=True)
     cache.clear()
+    print("cfg", cache.config)
     _reset_counters(counters)
     sim2 = basic_simulation.updated_copy(shutoff=1e-4)
     sim3 = basic_simulation.updated_copy(shutoff=1e-3)
     SIM_ORDER[:] = [basic_simulation, sim2, sim3]
 
     data = run_async({"task1": basic_simulation, "task2": sim2}, use_cache=True)
-    data_task1 = data["task1"] # access to store in cache
-    data_task2 = data["task2"] # access to store in cache
+    data_task1 = data["task1"]  # access to store in cache
+    data_task2 = data["task2"]  # access to store in cache
     assert counters["download"] == 2
     assert isinstance(data_task1, _FakeStubData)
     assert isinstance(data_task2, _FakeStubData)
     assert len(cache) == 2
-
 
     _reset_counters(counters)
     run_async({"task1": basic_simulation, "task2": sim2}, use_cache=True)
@@ -183,13 +185,12 @@ def _test_run_cache_hit_async(monkeypatch, basic_simulation):
     assert isinstance(data_task1, _FakeStubData)
     assert len(cache) == 2
 
-
     _reset_counters(counters)
     data = run_async({"task1": basic_simulation, "task3": sim3}, use_cache=True)
 
     data_task1 = data["task1"]
-    data_task2 = data["task3"] # access to store in cache
-    assert counters["download"] == 1 # sim3 is new
+    data_task2 = data["task3"]  # access to store in cache
+    assert counters["download"] == 1  # sim3 is new
     assert isinstance(data_task1, _FakeStubData)
     assert isinstance(data_task2, _FakeStubData)
     assert len(cache) == 3
@@ -210,7 +211,7 @@ def _test_load_cache_hit(monkeypatch, tmp_path, basic_simulation, fake_data):
     data = web.load(None, path=str(out_path), from_cache=True)
     assert isinstance(data, _FakeStubData)
     assert counters["download"] == 0  # served from cache
-    assert len(cache) == 1 # still 1 item in cache
+    assert len(cache) == 1  # still 1 item in cache
 
 
 def _test_checksum_mismatch_triggers_refresh(monkeypatch, tmp_path, basic_simulation):
@@ -228,8 +229,8 @@ def _test_checksum_mismatch_triggers_refresh(monkeypatch, tmp_path, basic_simula
     assert len(cache) == 0
 
 
-def _test_cache_eviction_by_entries(tmp_path_factory, basic_simulation):
-    config.simulation_cache.max_entries = 1
+def _test_cache_eviction_by_entries(monkeypatch, tmp_path_factory, basic_simulation):
+    monkeypatch.setattr(config.simulation_cache, "max_entries", 1)
     cache = resolve_simulation_cache(use_cache=True)
     cache.clear()
 
@@ -248,8 +249,8 @@ def _test_cache_eviction_by_entries(tmp_path_factory, basic_simulation):
     assert entries[0]["simulation_hash"] == sim2._hash_self()
 
 
-def _test_cache_eviction_by_size(tmp_path_factory, basic_simulation):
-    config.simulation_cache.max_size_gb = float(10_000 * 1e-9)
+def _test_cache_eviction_by_size(monkeypatch, tmp_path_factory, basic_simulation):
+    monkeypatch.setattr(config.simulation_cache, "max_size_gb", float(10_000 * 1e-9))
     cache = resolve_simulation_cache(use_cache=True)
     cache.clear()
 
@@ -267,17 +268,6 @@ def _test_cache_eviction_by_size(tmp_path_factory, basic_simulation):
     print("len(entries)", len(entries))
     assert len(cache) == 1
     assert entries[0]["simulation_hash"] == sim2._hash_self()
-
-
-
-def test_cache_end_to_end(monkeypatch, tmp_path, tmp_path_factory, basic_simulation, fake_data):
-    """Run all critical cache tests in sequence to ensure end-to-end stability."""
-    _test_run_cache_hit(monkeypatch, tmp_path, basic_simulation, fake_data)
-    _test_load_cache_hit(monkeypatch, tmp_path, basic_simulation, fake_data)
-    _test_checksum_mismatch_triggers_refresh(monkeypatch, tmp_path, basic_simulation)
-    _test_cache_eviction_by_entries(tmp_path_factory, basic_simulation)
-    _test_cache_eviction_by_size(tmp_path_factory, basic_simulation)
-    _test_run_cache_hit_async(monkeypatch, basic_simulation)
 
 
 def test_configure_cache_roundtrip(monkeypatch, tmp_path):
@@ -298,7 +288,7 @@ def test_env_var_overrides(monkeypatch, tmp_path):
     monkeypatch.setenv("TIDY3D_CACHE_DIR", str(tmp_path))
     monkeypatch.setenv("TIDY3D_CACHE_MAX_SIZE_GB", "0.5")
 
-    config.simulation_cache.max_entries = 5
+    monkeypatch.setattr(config.simulation_cache, "max_entries", 5)
     monkeypatch.setenv("TIDY3D_CACHE_MAX_ENTRIES", "7")
 
     cfg = resolve_simulation_cache().config
@@ -307,3 +297,12 @@ def test_env_var_overrides(monkeypatch, tmp_path):
     assert cfg.max_size_gb == 0.5
     assert cfg.max_entries == 7
 
+
+def test_cache_end_to_end(monkeypatch, tmp_path, tmp_path_factory, basic_simulation, fake_data):
+    """Run all critical cache tests in sequence to ensure end-to-end stability."""
+    _test_run_cache_hit(monkeypatch, tmp_path, basic_simulation, fake_data)
+    _test_load_cache_hit(monkeypatch, tmp_path, basic_simulation, fake_data)
+    _test_checksum_mismatch_triggers_refresh(monkeypatch, tmp_path, basic_simulation)
+    _test_cache_eviction_by_entries(monkeypatch, tmp_path_factory, basic_simulation)
+    _test_cache_eviction_by_size(monkeypatch, tmp_path_factory, basic_simulation)
+    _test_run_cache_hit_async(monkeypatch, basic_simulation)

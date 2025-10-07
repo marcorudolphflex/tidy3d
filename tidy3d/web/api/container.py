@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import concurrent
 import os
-import random
 import shutil
 import time
 import uuid
 from abc import ABC
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 from typing import Literal, Optional, Union
 
 import pydantic.v1 as pd
@@ -25,10 +23,9 @@ from tidy3d.components.types.workflow import WorkflowDataType, WorkflowType
 from tidy3d.exceptions import DataError
 from tidy3d.log import get_logging_console, log
 from tidy3d.web.api import webapi as web
-from tidy3d.web.api.tidy3d_stub import Tidy3dStub
 from tidy3d.web.api.tidy3d_stub import Tidy3dStub, Tidy3dStubData
-from tidy3d.web.api.webapi import get_reduced_simulation, _get_simulation_data_from_cache_entry
-from tidy3d.web.cache import build_cache_key, resolve_simulation_cache, CacheEntry, TMP_BATCH_PREFIX
+from tidy3d.web.api.webapi import _get_simulation_data_from_cache_entry, get_reduced_simulation
+from tidy3d.web.cache import TMP_BATCH_PREFIX, CacheEntry, resolve_simulation_cache
 from tidy3d.web.core.constants import TaskId, TaskName
 from tidy3d.web.core.task_core import Folder
 from tidy3d.web.core.task_info import RunInfo, TaskInfo
@@ -220,12 +217,6 @@ class Job(WebContainer):
         description="Specify the payment method.",
     )
 
-    data_cache_path: str | None = pd.Field(
-        None,
-        title="Data Cache Path",
-        description="File where cache is copied to.",
-    )
-
     _upload_fields = (
         "simulation",
         "task_name",
@@ -286,7 +277,7 @@ class Job(WebContainer):
         priority: int = None
             Priority of the simulation in the Virtual GPU (vGPU) queue (1 = lowest, 10 = highest).
             It affects only simulations from vGPU licenses and does not impact simulations using FlexCredits.
-        use_cache: bool = None
+        use_cache: Optional[bool] = None
             Override cache usage behaviour for this call. ``True`` forces cache usage when available,
             ``False`` bypasses it, and ``None`` defers to configuration and environment settings.
         Returns
@@ -310,6 +301,7 @@ class Job(WebContainer):
 
     @cached_property
     def data_cache_path(self) -> Optional[str]:
+        "Temporary path where cached results are stored."
         cache = resolve_simulation_cache(self.use_cache)
         if cache is not None:
             path = os.path.join(cache._root, TMP_BATCH_PREFIX, f"{self.task_name}.hdf5")
@@ -317,9 +309,7 @@ class Job(WebContainer):
         return None
 
     @cached_property
-    def load_if_cached(
-        self
-    ) -> bool:
+    def load_if_cached(self) -> bool:
         """Checks if data is already cached.
 
         Returns
@@ -335,10 +325,7 @@ class Job(WebContainer):
         if entry is not None:
             loaded_from_cache = _get_simulation_data_from_cache_entry(entry, path)
             if loaded_from_cache:
-                print(f"+ {self.task_name} found")
                 return True
-
-        print(f"X {self.task_name} NOT found")
         return False
 
     @cached_property
@@ -434,7 +421,7 @@ class Job(WebContainer):
         ----------
         path : str = "./simulation_data.hdf5"
             Path to download data as ``.hdf5`` file (including filename).
-        use_cache: bool = None
+        use_cache: Optional[bool] = None
             Override cache usage behaviour for this call. ``True`` forces cache usage when available,
             ``False`` bypasses it, and ``None`` defers to configuration and environment settings.
 
@@ -448,7 +435,6 @@ class Job(WebContainer):
         self._check_path_dir(path=path)
         web.download(task_id=self.task_id, path=path, verbose=self.verbose)
 
-
     def move_cache_file(self, path: str) -> None:
         if self._cache_file_moved:
             return
@@ -458,16 +444,14 @@ class Job(WebContainer):
         else:
             raise FileNotFoundError(f"Cached file does not longer exist in {path}.")
 
-    def load(
-        self, path: str = DEFAULT_DATA_PATH
-    ) -> WorkflowDataType:
+    def load(self, path: str = DEFAULT_DATA_PATH) -> WorkflowDataType:
         """Download job results and load them into a data object.
 
         Parameters
         ----------
         path : str = "./simulation_data.hdf5"
             Path to download data as ``.hdf5`` file (including filename).
-        use_cache: bool = None
+        use_cache: Optional[bool] = None
             Whether to use local cache if identical simulation is rerun. If not provided, cache settings from config or
             environment variables will be used.
 
@@ -614,7 +598,14 @@ class BatchData(Tidy3dBaseModel, Mapping):
         from_cache = self.cached_tasks[task_name] if self.cached_tasks else False
         web.get_info(task_id)
 
-        return web.load(task_id=task_id, path=task_data_path, verbose=False, from_cache=from_cache, use_cache=self.use_cache, replace_existing=False)
+        return web.load(
+            task_id=task_id,
+            path=task_data_path,
+            verbose=False,
+            from_cache=from_cache,
+            use_cache=self.use_cache,
+            replace_existing=False,
+        )
 
     def __getitem__(self, task_name: TaskName) -> WorkflowDataType:
         """Get the simulation data object for a given ``task_name``."""
@@ -1227,7 +1218,13 @@ class Batch(WebContainer):
             task_ids[task_name] = self.jobs[task_name].task_id
 
         loaded = {task_name: job.load_if_cached for task_name, job in self.jobs.items()}
-        data = BatchData(task_paths=task_paths, task_ids=task_ids, verbose=self.verbose, cached_tasks=loaded, use_cache=self.use_cache)
+        data = BatchData(
+            task_paths=task_paths,
+            task_ids=task_ids,
+            verbose=self.verbose,
+            cached_tasks=loaded,
+            use_cache=self.use_cache,
+        )
 
         for task_name, job in self.jobs.items():
             if isinstance(job.simulation, ModeSolver):

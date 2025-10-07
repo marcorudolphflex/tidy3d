@@ -8,7 +8,6 @@ import os
 import shutil
 import tempfile
 import threading
-import traceback
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -16,12 +15,12 @@ from enum import Enum
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
+
 from tidy3d import config
 from tidy3d.components.types.workflow import WorkflowDataType, WorkflowType
 from tidy3d.log import log
 from tidy3d.web.api.tidy3d_stub import Tidy3dStub
 from tidy3d.web.core.constants import TaskId
-from tidy3d.web.core.environment import Env
 from tidy3d.web.core.http_util import get_version as _get_protocol_version
 
 DEFAULT_CACHE_RELATIVE_DIR = Path(".tidy3d") / "cache" / "simulations"
@@ -38,7 +37,6 @@ TMP_BATCH_PREFIX = "tmp_batch"
 
 
 _CONFIG_LOCK = threading.RLock()
-
 
 
 @dataclass(frozen=True)
@@ -80,7 +78,6 @@ def _coerce_int(value: str) -> Optional[int]:
         return None
 
 
-
 def _load_env_overrides() -> dict[str, Any]:
     overrides: dict[str, Any] = {}
 
@@ -101,6 +98,7 @@ def _load_env_overrides() -> dict[str, Any]:
         overrides["max_entries"] = entries_env
 
     return overrides
+
 
 def _load_effective_config() -> SimulationCacheConfig:
     """
@@ -164,7 +162,6 @@ def get_cache() -> SimulationCache:
     return SimulationCache(cfg)
 
 
-
 def _merge_from_tidy3d_config() -> SimulationCacheConfig:
     """Overlay app-level persisted settings (if any) onto the current global config snapshot."""
     simulation_cache_settings = config.simulation_cache
@@ -176,15 +173,14 @@ def _merge_from_tidy3d_config() -> SimulationCacheConfig:
     )
 
 
-def _apply_overrides(cfg: SimulationCacheConfig, overrides: dict[str, Any]) -> SimulationCacheConfig:
+def _apply_overrides(
+    cfg: SimulationCacheConfig, overrides: dict[str, Any]
+) -> SimulationCacheConfig:
     """Apply dict-based overrides (enabled/directory/max_size_gb/max_entries)."""
     if not overrides:
         return cfg
     # Filter to fields that exist on the dataclass and are not None
-    allowed = {
-        k: v for k, v in overrides.items()
-        if v is not None and hasattr(cfg, k)
-    }
+    allowed = {k: v for k, v in overrides.items() if v is not None and hasattr(cfg, k)}
     return replace(cfg, **allowed) if allowed else cfg
 
 
@@ -202,6 +198,8 @@ def resolve_simulation_cache(use_cache: Optional[bool] = None) -> Optional[Simul
     desired = _load_effective_config()
 
     if use_cache is not None:
+        if desired.directory != current.directory:
+            get_cache().clear(hard=True)
         desired = replace(desired, enabled=use_cache)
 
     if desired != current:
@@ -215,9 +213,6 @@ def resolve_simulation_cache(use_cache: Optional[bool] = None) -> Optional[Simul
     except Exception as err:
         log.debug("Simulation cache unavailable: %s", err)
         return None
-
-
-
 
 
 @dataclass
@@ -270,6 +265,7 @@ class CacheEntry:
         shutil.copy2(self.artifact_path, target)
         return target
 
+
 class SimulationCache:
     """Manages storing and retrieving cached simulation artifacts."""
 
@@ -293,16 +289,16 @@ class SimulationCache:
         with self._lock:
             return [entry.metadata for entry in self._iter_entries()]
 
-    def clear(self) -> None:
+    def clear(self, hard=False) -> None:
         """Remove all cache contents."""
         with self._lock:
             if self._root.exists():
                 try:
                     shutil.rmtree(self._root)
-                    self._root.mkdir(parents=True, exist_ok=True)
+                    if not hard:
+                        self._root.mkdir(parents=True, exist_ok=True)
                 except (FileNotFoundError, OSError):
                     pass
-
 
     def _fetch(self, key: str) -> Optional[CacheEntry]:
         """Retrieve an entry by key, verifying checksum."""
@@ -524,12 +520,13 @@ class SimulationCache:
                 return None
                 # self._store(key=cache_key, task_id=task_id, source_path=path, metadata={})
             if verbose:
-                log.info("Simulation cache hit for workflow '%s'; using local results.", workflow_type)
+                log.info(
+                    "Simulation cache hit for workflow '%s'; using local results.", workflow_type
+                )
 
             return entry
         except Exception as e:
             log.error("Failed to fetch cache results." + str(e))
-
 
     def store_result(
         self,
@@ -573,9 +570,8 @@ class SimulationCache:
                 source_path=Path(path),
                 metadata=metadata,
             )
-        except Exception as e:
+        except Exception:
             log.error("Could not store cache entry.")
-            print("ERROR", e, traceback.format_exc())
 
 
 def _copy_and_hash(
@@ -643,10 +639,8 @@ class _Hasher:
         return self._hasher.hexdigest()
 
 
-
 def clear() -> None:
     """Remove all cache entries."""
-
     get_cache().clear()
 
 
