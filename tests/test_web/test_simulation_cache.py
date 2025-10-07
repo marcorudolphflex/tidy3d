@@ -177,6 +177,7 @@ def _test_run_cache_hit(monkeypatch, tmp_path, basic_simulation, fake_data):
 def _test_run_cache_hit_async(monkeypatch, basic_simulation):
     counters = _patch_run_pipeline(monkeypatch)
     get_cache().clear()
+    cache = get_cache()
     _reset_counters(counters)
     sim2 = basic_simulation.updated_copy(shutoff=1e-4)
     sim3 = basic_simulation.updated_copy(shutoff=1e-3)
@@ -189,8 +190,10 @@ def _test_run_cache_hit_async(monkeypatch, basic_simulation):
     data_task2 = data["task2"] # access to store in cache
     assert isinstance(data_task1, _FakeStubData)
     assert isinstance(data_task2, _FakeStubData)
-    cache = get_cache()
     print("cache size", len(cache))
+    assert len(cache) == 2
+
+    print("-------------------")
 
     _reset_counters(counters)
     data = run_async({"task1": basic_simulation, "task2": sim2}, use_cache=True)
@@ -198,9 +201,13 @@ def _test_run_cache_hit_async(monkeypatch, basic_simulation):
     assert counters["download"] == 0
     data_task1 = data["task1"]
     assert isinstance(data_task1, _FakeStubData)
+    print("cache size", len(cache))
+    assert len(cache) == 2
+
+    print("-------------------")
 
     _reset_counters(counters)
-    data = run_async({"task1": basic_simulation, "task2": sim3}, use_cache=True)
+    data = run_async({"task1": basic_simulation, "task3": sim3}, use_cache=True)
     print(counters)
     assert counters["download"] == 1
 
@@ -208,6 +215,8 @@ def _test_run_cache_hit_async(monkeypatch, basic_simulation):
     data_task2 = data["task2"]
     assert isinstance(data_task1, _FakeStubData)
     assert isinstance(data_task2, _FakeStubData)
+    print("cache size", len(cache))
+    assert len(cache) == 3
 
 
 def _test_load_cache_hit(monkeypatch, tmp_path, basic_simulation, fake_data):
