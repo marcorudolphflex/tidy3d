@@ -15,14 +15,11 @@ from datetime import datetime, timezone
 from enum import Enum
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Optional, Union
-
-import toml
-
+from typing import Any, Optional
+from tidy3d import config
 from tidy3d.components.types.workflow import WorkflowDataType, WorkflowType
 from tidy3d.log import log
-from tidy3d.web.api.tidy3d_stub import Tidy3dStub, Tidy3dStubData
-from tidy3d.web.cli.constants import CONFIG_FILE as CLI_CONFIG_FILE
+from tidy3d.web.api.tidy3d_stub import Tidy3dStub
 from tidy3d.web.core.constants import TaskId
 from tidy3d.web.core.environment import Env
 from tidy3d.web.core.http_util import get_version as _get_protocol_version
@@ -37,52 +34,21 @@ ENV_MAX_SIZE = "TIDY3D_CACHE_MAX_SIZE_GB"
 ENV_MAX_ENTRIES = "TIDY3D_CACHE_MAX_ENTRIES"
 
 TMP_PREFIX = "tidy3d-cache-"
+TMP_BATCH_PREFIX = "tmp_batch"
 
-def _environment_context() -> dict[str, Any]:
-    env = Env.current
-    return {
-        "name": env.name,
-        "web_api_endpoint": env.web_api_endpoint,
-        "website_endpoint": env.website_endpoint,
-        "s3_region": env.s3_region,
-    }
+
+_CONFIG_LOCK = threading.RLock()
 
 
 
-def _resolve_cache(use_cache: Optional[bool]):
-    cache_config = get_cache_config()
+@dataclass(frozen=True)
+class SimulationCacheConfig:
+    """Configuration for the simulation cache."""
 
-    try:
-        from tidy3d import config as tidy3d_config
-    except Exception:
-        simulation_cache_settings = None
-    else:
-        simulation_cache_settings = getattr(tidy3d_config, "simulation_cache", None)
-
-    if simulation_cache_settings is not None:
-        desired_config = SimulationCacheConfig(
-            enabled=simulation_cache_settings.enabled,
-            directory=simulation_cache_settings.directory,
-            max_size_gb=simulation_cache_settings.max_size_gb,
-            max_entries=simulation_cache_settings.max_entries,
-        )
-        if desired_config != cache_config:
-            configure_cache(desired_config)
-            cache_config = desired_config
-
-    enabled = cache_config.enabled
-    env_override = Env.current.enable_caching
-    if env_override is not None:
-        enabled = env_override
-    if use_cache is not None:
-        enabled = use_cache
-    if not enabled:
-        return None
-    try:
-        return get_cache()
-    except Exception as err:
-        log.debug("Simulation cache unavailable: %s", err)
-        return None
+    enabled: bool = False
+    directory: Path = field(default_factory=lambda: Path.home() / DEFAULT_CACHE_RELATIVE_DIR)
+    max_size_gb: float = 8.0
+    max_entries: int = 32
 
 
 def _coerce_bool(value: str) -> Optional[bool]:
@@ -114,22 +80,6 @@ def _coerce_int(value: str) -> Optional[int]:
         return None
 
 
-def _load_cli_cache_settings() -> dict[str, Any]:
-    if not os.path.exists(CLI_CONFIG_FILE):
-        return {}
-    try:
-        with open(CLI_CONFIG_FILE, encoding="utf-8") as fh:
-            content = fh.read()
-        if not content.strip():
-            return {}
-        config = toml.loads(content)
-    except Exception as err:
-        log.debug("Failed to parse CLI cache settings: %s", err)
-        return {}
-
-    section = config.get("simulation_cache")
-    return section if isinstance(section, dict) else {}
-
 
 def _load_env_overrides() -> dict[str, Any]:
     overrides: dict[str, Any] = {}
@@ -152,58 +102,122 @@ def _load_env_overrides() -> dict[str, Any]:
 
     return overrides
 
-
-def _apply_updates(config: SimulationCacheConfig, updates: dict[str, Any]) -> SimulationCacheConfig:
-    if not updates:
-        return config
-
-    kwargs: dict[str, Any] = {}
-    for key, value in updates.items():
-        if key not in {"enabled", "directory", "max_size_gb", "max_entries"}:
-            continue
-        if key == "directory" and value is not None:
-            try:
-                value = Path(value).expanduser()
-            except Exception:
-                log.debug("Ignoring invalid cache directory override: %s", value)
-                continue
-        if key == "max_size_gb" and value is not None:
-            try:
-                value = float(value)
-            except (TypeError, ValueError):
-                log.debug("Ignoring invalid cache size override: %s", value)
-                continue
-            if value < 0:
-                log.debug("Ignoring negative cache size override: %s", value)
-                continue
-        if key == "max_entries" and value is not None:
-            try:
-                value = int(value)
-            except (TypeError, ValueError):
-                log.debug("Ignoring invalid cache entry override: %s", value)
-                continue
-            if value < 0:
-                log.debug("Ignoring negative cache entry override: %s", value)
-                continue
-        kwargs[key] = value
-    return replace(config, **kwargs) if kwargs else config
-
-
 def _load_effective_config() -> SimulationCacheConfig:
-    config = SimulationCacheConfig()
-    config = _apply_updates(config, _load_cli_cache_settings())
-    config = _apply_updates(config, _load_env_overrides())
-    return config
+    """
+    Build the initial, global cache config at import-time.
+
+    Precedence for fields (lowest → highest):
+      1) library defaults (disabled, ~/.tidy3d/cache/simulations, limits)
+      2) persisted app config (config.simulation_cache_settings), if present
+      3) environment overrides (TIDY3D_CACHE_*)
+
+    Note: per-call `use_cache` is *not* applied here; that’s handled in
+    resolve_simulation_cache(...), which can reconfigure the singleton later.
+    """
+    sim_cache_settings = config.simulation_cache
+
+    cfg = SimulationCacheConfig(
+        enabled=sim_cache_settings.enabled,
+        directory=sim_cache_settings.directory,
+        max_size_gb=sim_cache_settings.max_size_gb,
+        max_entries=sim_cache_settings.max_entries,
+    )
+
+    env_overrides = _load_env_overrides()
+    if env_overrides:
+        allowed = {k: v for k, v in env_overrides.items() if v is not None}
+        if allowed:
+            cfg = replace(cfg, **allowed)
+
+    if cfg.directory:
+        cfg = replace(cfg, directory=Path(cfg.directory).expanduser().resolve())
+
+    return cfg
 
 
-@dataclass(frozen=True)
-class SimulationCacheConfig:
-    """Configuration for the simulation cache."""
+_CACHE_CONFIG: SimulationCacheConfig = _load_effective_config()
 
-    enabled: bool = False
-    directory: Path = field(default_factory=lambda: Path.home() / DEFAULT_CACHE_RELATIVE_DIR)
-    max_size_gb: float = 8.0
-    max_entries: int = 32
+
+def get_cache_config() -> SimulationCacheConfig:
+    """Thread-safe snapshot copy of the active global cache configuration."""
+    with _CONFIG_LOCK:
+        return replace(_CACHE_CONFIG)
+
+
+def configure_cache(new_config: SimulationCacheConfig) -> None:
+    """Swap the active global config and reset the cache singleton."""
+    global _CACHE_CONFIG
+    with _CONFIG_LOCK:
+        _CACHE_CONFIG = new_config
+    get_cache.cache_clear()
+
+
+@lru_cache
+def get_cache() -> SimulationCache:
+    """
+    Return the singleton SimulationCache built from the *current* global config.
+
+    This is automatically refreshed whenever `configure_cache(...)` is called,
+    because that function clears this LRU entry.
+    """
+    cfg = get_cache_config()
+    return SimulationCache(cfg)
+
+
+
+def _merge_from_tidy3d_config() -> SimulationCacheConfig:
+    """Overlay app-level persisted settings (if any) onto the current global config snapshot."""
+    simulation_cache_settings = config.simulation_cache
+    return SimulationCacheConfig(
+        enabled=simulation_cache_settings.enabled,
+        directory=simulation_cache_settings.directory,
+        max_size_gb=simulation_cache_settings.max_size_gb,
+        max_entries=simulation_cache_settings.max_entries,
+    )
+
+
+def _apply_overrides(cfg: SimulationCacheConfig, overrides: dict[str, Any]) -> SimulationCacheConfig:
+    """Apply dict-based overrides (enabled/directory/max_size_gb/max_entries)."""
+    if not overrides:
+        return cfg
+    # Filter to fields that exist on the dataclass and are not None
+    allowed = {
+        k: v for k, v in overrides.items()
+        if v is not None and hasattr(cfg, k)
+    }
+    return replace(cfg, **allowed) if allowed else cfg
+
+
+def resolve_simulation_cache(use_cache: Optional[bool] = None) -> Optional[SimulationCache]:
+    """
+    Return a SimulationCache configured from:
+      1) persisted config (directory/limits + default enabled),
+      2) environment overrides (enabled + directory/limits),
+      3) per-call 'use_cache' (enabled only, highest precedence).
+
+    If effective config differs from the active global config, reconfigure the singleton.
+    Returns None if final 'enabled' is False.
+    """
+    current = get_cache_config()
+    desired = _load_effective_config()
+
+    if use_cache is not None:
+        desired = replace(desired, enabled=use_cache)
+
+    if desired != current:
+        configure_cache(desired)
+
+    if not desired.enabled:
+        return None
+
+    try:
+        return get_cache()
+    except Exception as err:
+        log.debug("Simulation cache unavailable: %s", err)
+        return None
+
+
+
 
 
 @dataclass
@@ -288,8 +302,6 @@ class SimulationCache:
                     self._root.mkdir(parents=True, exist_ok=True)
                 except (FileNotFoundError, OSError):
                     pass
-
-
 
 
     def _fetch(self, key: str) -> Optional[CacheEntry]:
@@ -450,7 +462,7 @@ class SimulationCache:
             return []
         entries: list[CacheEntry] = []
         for child in self._root.iterdir():
-            if child.name.startswith(TMP_PREFIX):
+            if child.name.startswith(TMP_PREFIX) or child.name.startswith(TMP_BATCH_PREFIX):
                 continue
             meta_path = child / CACHE_METADATA_NAME
             if not meta_path.exists():
@@ -500,11 +512,10 @@ class SimulationCache:
             workflow_type = Tidy3dStub(simulation=simulation).get_type()
 
             versions = _get_protocol_version()
-            environment = _environment_context()
+
             cache_key = build_cache_key(
                 simulation_hash=simulation_hash,
                 workflow_type=workflow_type,
-                environment=environment,
                 version=versions,
             )
 
@@ -519,27 +530,6 @@ class SimulationCache:
         except Exception as e:
             log.error("Failed to fetch cache results." + str(e))
 
-    def try_fetch_by_task(
-        self,
-        task_id: TaskId,
-        verbose: bool = False,
-    ) -> Optional[CacheEntry]:
-        """
-        Try to satisfy `load()` from cache BEFORE downloading.
-        Since we don't have the simulation hash yet, we use the task-id index.
-        Returns None on miss or on any cache error.
-        """
-
-        try:
-            entry = self.fetch_by_task(task_id)
-            if not entry:
-                return None
-            if verbose:
-                log.info("Simulation cache hit for task '%s'; using local results.", task_id)
-            return entry
-        except Exception as err:
-            log.debug("Simulation cache unavailable for load: %s", err)
-            return None
 
     def store_result(
         self,
@@ -560,12 +550,10 @@ class SimulationCache:
                 return
 
             version = _get_protocol_version()
-            environment = _environment_context()
 
             cache_key = build_cache_key(
                 simulation_hash=simulation_hash,
                 workflow_type=workflow_type,
-                environment=environment,
                 version=version,
             )
 
@@ -575,7 +563,6 @@ class SimulationCache:
                 runtime_context={
                     "task_id": task_id,
                 },
-                environment=environment,
                 version=version,
                 extras={"path": str(Path(path))},
             )
@@ -656,32 +643,6 @@ class _Hasher:
         return self._hasher.hexdigest()
 
 
-_CONFIG_LOCK = threading.RLock()
-_CACHE_CONFIG = _load_effective_config()
-
-
-def get_cache_config() -> SimulationCacheConfig:
-    """Return a copy of the active cache configuration."""
-
-    with _CONFIG_LOCK:
-        return replace(_CACHE_CONFIG)
-
-
-@lru_cache
-def get_cache() -> SimulationCache:
-    """Get a singleton ``SimulationCache`` instance."""
-
-    return SimulationCache(get_cache_config())
-
-
-def configure_cache(config: SimulationCacheConfig) -> None:
-    """Override the global cache configuration."""
-
-    global _CACHE_CONFIG
-    with _CONFIG_LOCK:
-        _CACHE_CONFIG = config
-    get_cache.cache_clear()
-
 
 def clear() -> None:
     """Remove all cache entries."""
@@ -716,16 +677,16 @@ def build_cache_key(
     *,
     simulation_hash: str,
     workflow_type: str,
-    environment: dict[str, Any],
     version: str,
+    solver_version: str,
 ) -> str:
     """Construct a deterministic cache key."""
 
     payload = {
         "simulation_hash": simulation_hash,
         "workflow_type": workflow_type,
-        "environment": _canonicalize(environment),
         "versions": _canonicalize(version),
+        "solver_version": _canonicalize(solver_version),
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -736,7 +697,6 @@ def build_entry_metadata(
     simulation_hash: str,
     workflow_type: str,
     runtime_context: dict[str, Any],
-    environment: dict[str, Any],
     version: str,
     extras: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
@@ -746,7 +706,6 @@ def build_entry_metadata(
         "simulation_hash": simulation_hash,
         "workflow_type": workflow_type,
         "runtime_context": _canonicalize(runtime_context),
-        "environment": _canonicalize(environment),
         "versions": _canonicalize(version),
         "task_ids": [],
     }

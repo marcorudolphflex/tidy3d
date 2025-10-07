@@ -19,7 +19,7 @@ from tidy3d.components.types.workflow import WorkflowDataType, WorkflowType
 from tidy3d.exceptions import WebError
 from tidy3d.log import get_logging_console, log
 from tidy3d.plugins.smatrix.component_modelers.terminal import TerminalComponentModeler
-from tidy3d.web.cache import _resolve_cache, SimulationCache, CacheEntry
+from tidy3d.web.cache import resolve_simulation_cache, SimulationCache, CacheEntry
 from tidy3d.web.core.account import Account
 from tidy3d.web.core.constants import (
     CM_DATA_HDF5_GZ,
@@ -123,12 +123,14 @@ def _task_dict_to_url_bullet_list(data_dict: dict) -> str:
     # and then join them together with newline characters.
     return "\n".join([f"- {key}: '{value}'" for key, value in data_dict.items()])
 
-def _get_simulation_data_from_cache_entry(entry: CacheEntry, path: str) -> Optional[WorkflowDataType]:
+def _get_simulation_data_from_cache_entry(entry: CacheEntry, path: str) -> bool:
     if entry is not None:
-        entry.materialize(Path(path))
-        data = Tidy3dStubData.postprocess(path)
-        return data
-    return None
+        try:
+            entry.materialize(Path(path))
+            return True
+        except Exception:
+            return False
+    return False
 
 @wait_for_connection
 def run(
@@ -232,18 +234,18 @@ def run(
     :meth:`tidy3d.web.api.container.Batch.monitor`
         Monitor progress of each of the running tasks.
     """
-    simulation_cache = _resolve_cache(use_cache)
-    data = None
+    simulation_cache = resolve_simulation_cache(use_cache)
+    loaded_from_cache = False
     if simulation_cache is not None:
         sim_for_cache = simulation
-        if isinstance(simulation, (ModeSolver, ModeSimulation)) and reduce_simulation:
+        if isinstance(simulation, (ModeSolver, ModeSimulation)):
             sim_for_cache = get_reduced_simulation(simulation, reduce_simulation)
         entry = simulation_cache.try_fetch(
             simulation=sim_for_cache
         )
-        data = _get_simulation_data_from_cache_entry(entry, path)
+        loaded_from_cache = _get_simulation_data_from_cache_entry(entry, path)
 
-    if data is None: # got no data from cache
+    if not loaded_from_cache:
         task_id = upload(
             simulation=simulation,
             task_name=task_name,
@@ -265,13 +267,17 @@ def run(
             priority=priority,
         )
         monitor(task_id, verbose=verbose)
-        data = load(
-            task_id=task_id,
-            path=path,
-            verbose=verbose,
-            progress_callback=progress_callback_download,
-            use_cache=use_cache,
-        )
+    else:
+        task_id = None
+
+    data = load(
+        task_id=task_id,
+        path=path,
+        verbose=verbose,
+        progress_callback=progress_callback_download,
+        use_cache=use_cache,
+        from_cache=loaded_from_cache,
+    )
 
     if isinstance(simulation, ModeSolver):
         simulation._patch_data(data=data)
@@ -1012,7 +1018,7 @@ def download_log(
 
 @wait_for_connection
 def load(
-    task_id: TaskId,
+    task_id: Optional[TaskId],
     path: str = "simulation_data.hdf5",
     replace_existing: bool = True,
     verbose: bool = True,
@@ -1060,8 +1066,10 @@ def load(
     Union[:class:`.SimulationData`, :class:`.HeatSimulationData`, :class:`.EMESimulationData`]
         Object containing simulation data.
     """
+    assert from_cache or task_id, "Either task_id or from_cache must be provided."
+
     # For component modeler batches, default to a clearer filename if the default was used.
-    if _is_modeler_batch(task_id) and os.path.basename(path) == "simulation_data.hdf5":
+    if not from_cache and _is_modeler_batch(task_id) and os.path.basename(path) == "simulation_data.hdf5":
         base_dir = os.path.dirname(path) or "."
         path = os.path.join(base_dir, "cm_data.hdf5")
 
@@ -1073,7 +1081,7 @@ def load(
 
     if verbose:
         console = get_logging_console()
-        if _is_modeler_batch(task_id):
+        if not from_cache and _is_modeler_batch(task_id): # TODO inspect
             console.log(f"loading component modeler data from {path}")
         else:
             console.log(f"loading simulation from {path}")
@@ -1081,7 +1089,7 @@ def load(
     stub_data = Tidy3dStubData.postprocess(path, lazy=lazy)
 
 
-    simulation_cache = _resolve_cache(use_cache)
+    simulation_cache = resolve_simulation_cache(use_cache)
     if simulation_cache is not None and not from_cache:
         info = get_info(task_id, verbose=False)
         workflow_type = getattr(info, "taskType", None) or type(stub_data).__name__

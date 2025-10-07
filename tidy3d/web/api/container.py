@@ -28,7 +28,7 @@ from tidy3d.web.api import webapi as web
 from tidy3d.web.api.tidy3d_stub import Tidy3dStub
 from tidy3d.web.api.tidy3d_stub import Tidy3dStub, Tidy3dStubData
 from tidy3d.web.api.webapi import get_reduced_simulation, _get_simulation_data_from_cache_entry
-from tidy3d.web.cache import build_cache_key, _resolve_cache, CacheEntry
+from tidy3d.web.cache import build_cache_key, resolve_simulation_cache, CacheEntry, TMP_BATCH_PREFIX
 from tidy3d.web.core.constants import TaskId, TaskName
 from tidy3d.web.core.task_core import Folder
 from tidy3d.web.core.task_info import RunInfo, TaskInfo
@@ -263,10 +263,10 @@ class Job(WebContainer):
         super(Job, self).to_file(fname=fname)  # noqa: UP008
 
     def get_cache_hit_entry(self) -> Optional[CacheEntry]:
-        simulation_cache = _resolve_cache(self.use_cache)
+        simulation_cache = resolve_simulation_cache(self.use_cache)
         if simulation_cache is not None:
             sim_for_cache = self.simulation
-            if isinstance(self.simulation, (ModeSolver, ModeSimulation)) and self.reduce_simulation:
+            if isinstance(self.simulation, (ModeSolver, ModeSimulation)):
                 sim_for_cache = get_reduced_simulation(self.simulation, self.reduce_simulation)
             entry = simulation_cache.try_fetch(simulation=sim_for_cache)
             return entry
@@ -276,7 +276,6 @@ class Job(WebContainer):
         self,
         path: str = DEFAULT_DATA_PATH,
         priority: Optional[int] = None,
-        use_cache: Optional[bool] = None,
     ) -> WorkflowDataType:
         """Run :class:`Job` all the way through and return data.
 
@@ -311,8 +310,8 @@ class Job(WebContainer):
 
     @cached_property
     def data_cache_path(self) -> str:
-        cache = _resolve_cache(self.use_cache)
-        path = os.path.join(cache._root, "tmp", f"{self.task_name}.hdf5")
+        cache = resolve_simulation_cache(self.use_cache)
+        path = os.path.join(cache._root, TMP_BATCH_PREFIX, f"{self.task_name}.hdf5")
         return path
 
     @cached_property
@@ -330,13 +329,10 @@ class Job(WebContainer):
         self._check_path_dir(path=path)
         entry = self.get_cache_hit_entry()
         if entry is not None:
-            data = _get_simulation_data_from_cache_entry(entry, path)
-            if data is not None:
-                entry = self.get_cache_hit_entry()
-                if entry is not None:
-                    entry.materialize(Path(path))
-                    print(f"+ {self.task_name} found")
-                    return True
+            loaded_from_cache = _get_simulation_data_from_cache_entry(entry, path)
+            if loaded_from_cache:
+                print(f"+ {self.task_name} found")
+                return True
 
         print(f"X {self.task_name} NOT found")
         return False
@@ -351,7 +347,7 @@ class Job(WebContainer):
         self._check_folder(self.folder_name)
         return self._upload()
 
-    def _upload(self) -> Optional[TaskId]:
+    def _upload(self) -> TaskId:
         """Upload this job and return the task ID for handling."""
         # upload kwargs with all fields except task_id
         upload_kwargs = {key: getattr(self, key) for key in self._upload_fields}
@@ -776,9 +772,6 @@ class Batch(WebContainer):
         priority: int = None
             Priority of the simulation in the Virtual GPU (vGPU) queue (1 = lowest, 10 = highest).
             It affects only simulations from vGPU licenses and does not impact simulations using FlexCredits.
-        use_cache: bool = None
-            Whether to use local cache if identical simulation is rerun. If not provided, cache settings from config or
-            environment variables will be used.
         Returns
         ------
         :class:`BatchData`
@@ -1168,7 +1161,6 @@ class Batch(WebContainer):
                         log.info(f"File '{job_path_str}' already exists. Overwriting.")
                     else:
                         log.info(f"File '{job_path_str}' already exists. Skipping.")
-                        # continue # TODO remove
                 if "error" in job.status:
                     log.warning(f"Not downloading '{task_name}' as the task errored.")
                     continue

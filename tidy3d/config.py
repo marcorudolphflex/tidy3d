@@ -29,7 +29,7 @@ class SimulationCacheSettings(pd.BaseModel):
         ge=0.0,
     )
     max_entries: int = pd.Field(
-        25,
+        128,
         description="Maximum number of cache entries. Set to 0 for no limit.",
         ge=0,
     )
@@ -74,7 +74,7 @@ class Tidy3dConfig(pd.BaseModel):
     )
 
     simulation_cache: SimulationCacheSettings = pd.Field(
-        SimulationCacheSettings(),
+        default_factory=SimulationCacheSettings,
         title="Simulation Cache",
         description="Configuration for the optional local simulation cache.",
     )
