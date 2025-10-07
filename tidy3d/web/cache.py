@@ -518,7 +518,6 @@ class SimulationCache:
             entry = self._fetch(cache_key)
             if not entry:
                 return None
-                # self._store(key=cache_key, task_id=task_id, source_path=path, metadata={})
             if verbose:
                 log.info(
                     "Simulation cache hit for workflow '%s'; using local results.", workflow_type
@@ -526,7 +525,7 @@ class SimulationCache:
 
             return entry
         except Exception as e:
-            log.error("Failed to fetch cache results." + str(e))
+            log.error("Failed to fetch cache results.")
 
     def store_result(
         self,

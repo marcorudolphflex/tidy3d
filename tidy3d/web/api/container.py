@@ -300,9 +300,6 @@ class Job(WebContainer):
         priority: int = None
             Priority of the simulation in the Virtual GPU (vGPU) queue (1 = lowest, 10 = highest).
             It affects only simulations from vGPU licenses and does not impact simulations using FlexCredits.
-        use_cache: Optional[bool] = None
-            Override cache usage behaviour for this call. ``True`` forces cache usage when available,
-            ``False`` bypasses it, and ``None`` defers to configuration and environment settings.
         Returns
         -------
         :class:`WorkflowDataType`
@@ -461,9 +458,6 @@ class Job(WebContainer):
         ----------
         path : str = "./simulation_data.hdf5"
             Path to download data as ``.hdf5`` file (including filename).
-        use_cache: Optional[bool] = None
-            Override cache usage behaviour for this call. ``True`` forces cache usage when available,
-            ``False`` bypasses it, and ``None`` defers to configuration and environment settings.
 
         Note
         ----
@@ -482,7 +476,7 @@ class Job(WebContainer):
             shutil.move(self.data_cache_path, path)
             self._cache_file_moved = True
         else:
-            raise FileNotFoundError(f"Cached file does not longer exist in {path}.")
+            raise FileNotFoundError(f"Cached file does not longer exist in {self.data_cache_path}.")
 
     def load(self, path: str = DEFAULT_DATA_PATH) -> WorkflowDataType:
         """Download job results and load them into a data object.

@@ -326,7 +326,6 @@ def run_async(
     lazy : bool = False
         Whether to load the actual data (``lazy=False``) or return a proxy that loads
         the data when accessed (``lazy=True``).
-        Whether to reduce structures in the simulation to the simulation domain only. Note: currently only implemented for the mode solver.
     use_cache: Optional[bool] = None
         Whether to use local cache if identical simulation is rerun. If not provided, cache settings from config or
         environment variables will be used.

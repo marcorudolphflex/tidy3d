@@ -265,7 +265,6 @@ def _test_cache_eviction_by_size(monkeypatch, tmp_path_factory, basic_simulation
     cache.store_result(_FakeStubData(sim2), MOCK_TASK_ID, str(file2), "FDTD")
 
     entries = cache.list()
-    print("len(entries)", len(entries))
     assert len(cache) == 1
     assert entries[0]["simulation_hash"] == sim2._hash_self()
 
