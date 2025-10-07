@@ -678,7 +678,6 @@ def build_cache_key(
     simulation_hash: str,
     workflow_type: str,
     version: str,
-    solver_version: str,
 ) -> str:
     """Construct a deterministic cache key."""
 
@@ -686,7 +685,6 @@ def build_cache_key(
         "simulation_hash": simulation_hash,
         "workflow_type": workflow_type,
         "versions": _canonicalize(version),
-        "solver_version": _canonicalize(solver_version),
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()

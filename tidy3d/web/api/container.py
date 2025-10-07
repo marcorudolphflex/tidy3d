@@ -309,10 +309,12 @@ class Job(WebContainer):
         return data
 
     @cached_property
-    def data_cache_path(self) -> str:
+    def data_cache_path(self) -> Optional[str]:
         cache = resolve_simulation_cache(self.use_cache)
-        path = os.path.join(cache._root, TMP_BATCH_PREFIX, f"{self.task_name}.hdf5")
-        return path
+        if cache is not None:
+            path = os.path.join(cache._root, TMP_BATCH_PREFIX, f"{self.task_name}.hdf5")
+            return path
+        return None
 
     @cached_property
     def load_if_cached(
@@ -326,6 +328,8 @@ class Job(WebContainer):
             Whether item was found in cache.
         """
         path = self.data_cache_path
+        if path is None:
+            return False
         self._check_path_dir(path=path)
         entry = self.get_cache_hit_entry()
         if entry is not None:
@@ -393,7 +397,7 @@ class Job(WebContainer):
         Function has no effect if cache is enabled and data was found in cache.
         """
         loaded = self.load_if_cached
-        if loaded is None:
+        if not loaded:
             web.start(
                 self.task_id,
                 solver_version=self.solver_version,
