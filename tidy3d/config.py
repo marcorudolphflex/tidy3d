@@ -8,6 +8,7 @@ from typing import Optional
 import pydantic.v1 as pd
 
 from .log import DEFAULT_LEVEL, LogLevel, set_log_suppression, set_logging_level
+
 _DEFAULT_CACHE_DIR = Path.home() / ".tidy3d" / "cache" / "simulations"
 
 
@@ -36,6 +37,7 @@ class SimulationCacheSettings(pd.BaseModel):
     @pd.validator("directory", pre=True, always=True)
     def _validate_directory(cls, value):
         return Path(value).expanduser()
+
 
 class Tidy3dConfig(pd.BaseModel):
     """configuration of tidy3d"""

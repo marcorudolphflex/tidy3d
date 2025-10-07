@@ -524,7 +524,7 @@ class SimulationCache:
                 )
 
             return entry
-        except Exception as e:
+        except Exception:
             log.error("Failed to fetch cache results.")
 
     def store_result(
