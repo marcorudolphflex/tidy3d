@@ -460,8 +460,6 @@ class SimulationCache:
     def try_fetch(
         self,
         simulation: WorkflowType,
-        register_if_found: bool = False,
-        task_id: Optional[str] = None,
         verbose: bool = False,
     ) -> Optional[CacheEntry]:
         """
@@ -487,9 +485,6 @@ class SimulationCache:
             entry = self._fetch(cache_key)
             if not entry:
                 return None
-            if register_if_found:
-                if task_id is None:
-                    raise ValueError("provide task_id if item should be registered in cache")
                 # self._store(key=cache_key, task_id=task_id, source_path=path, metadata={})
             if verbose:
                 log.info(
@@ -497,8 +492,8 @@ class SimulationCache:
                 )
 
             return entry
-        except Exception:
-            log.error("Failed to fetch cache results.")
+        except Exception as e:
+            log.error("Failed to fetch cache results." + str(e))
 
     def store_result(
         self,
