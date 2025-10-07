@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Literal, Optional, Union
 
 import pydantic.v1 as pd
+from pydantic.v1 import PrivateAttr
 from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn, TimeElapsedColumn
 
 from tidy3d.components.base import Tidy3dBaseModel, cached_property
@@ -252,7 +253,7 @@ class Job(WebContainer):
         "reduce_simulation",
     )
 
-    _cache_file_moved = False
+    _cache_file_moved: bool = PrivateAttr(default=False)
 
     use_cache: Optional[bool] = pd.Field(
         None,

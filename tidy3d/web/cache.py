@@ -162,17 +162,6 @@ def get_cache() -> SimulationCache:
     return SimulationCache(cfg)
 
 
-def _merge_from_tidy3d_config() -> SimulationCacheConfig:
-    """Overlay app-level persisted settings (if any) onto the current global config snapshot."""
-    simulation_cache_settings = config.simulation_cache
-    return SimulationCacheConfig(
-        enabled=simulation_cache_settings.enabled,
-        directory=simulation_cache_settings.directory,
-        max_size_gb=simulation_cache_settings.max_size_gb,
-        max_entries=simulation_cache_settings.max_entries,
-    )
-
-
 def _apply_overrides(
     cfg: SimulationCacheConfig, overrides: dict[str, Any]
 ) -> SimulationCacheConfig:

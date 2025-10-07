@@ -203,6 +203,23 @@ def _test_run_cache_hit_async(monkeypatch, basic_simulation):
     assert len(cache) == 3
 
 
+def _test_job_run_cache(monkeypatch, tmp_path_factory, basic_simulation):
+    counters = _patch_run_pipeline(monkeypatch)
+    cache = resolve_simulation_cache(use_cache=True)
+    cache.clear()
+    job = Job(simulation=basic_simulation, use_cache=True, task_name="test")
+    job.run()
+
+    assert len(cache) == 1
+
+    _reset_counters(counters)
+
+    job2 = Job(simulation=basic_simulation, use_cache=True, task_name="test")
+    job2.run()
+    assert len(cache) == 1
+    assert counters["download"] == 0
+
+
 def _test_load_cache_hit(monkeypatch, tmp_path, basic_simulation, fake_data):
     get_cache().clear()
     counters = _patch_run_pipeline(monkeypatch)
@@ -312,3 +329,4 @@ def test_cache_end_to_end(monkeypatch, tmp_path, tmp_path_factory, basic_simulat
     _test_cache_eviction_by_entries(monkeypatch, tmp_path_factory, basic_simulation)
     _test_cache_eviction_by_size(monkeypatch, tmp_path_factory, basic_simulation)
     _test_run_cache_hit_async(monkeypatch, basic_simulation)
+    _test_job_run_cache(monkeypatch, tmp_path_factory, basic_simulation)
