@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 from tidy3d import config
-from tidy3d.web.cache import resolve_simulation_cache, get_cache
+from tidy3d.web.cache import resolve_simulation_cache
 
 # config.simulation_cache.max_size_gb = float(10_000 * 1e-9)
 # cache = resolve_simulation_cache(use_cache=True)
