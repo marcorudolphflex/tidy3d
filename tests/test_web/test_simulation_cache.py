@@ -6,13 +6,16 @@ import pytest
 
 import tidy3d as td
 from tidy3d import config
-from tidy3d.web import Job, run_async
+from tidy3d.web import Job, run_async, common
 from tidy3d.web.api import webapi as web
+from tidy3d.web.api.container import WebContainer
 from tidy3d.web.cache import (
     CACHE_ARTIFACT_NAME,
     get_cache,
     resolve_simulation_cache,
 )
+
+common.CONNECTION_RETRY_TIME = 0.1
 
 MOCK_TASK_ID = "task-xyz"
 # --- Fake pipeline global maps / queue ---
@@ -120,9 +123,13 @@ def _patch_run_pipeline(monkeypatch):
         if sim is not None:
             PATH_TO_SIM[str(Path(path))] = sim
 
+    def _fake__check_folder(*args, **kwargs):
+        pass
+
     def _fake_status(self):
         return "success"
 
+    monkeypatch.setattr(WebContainer, "_check_folder", _fake__check_folder)
     monkeypatch.setattr(web, "upload", _fake_upload)
     monkeypatch.setattr(web, "start", _fake_start)
     monkeypatch.setattr(web, "monitor", _fake_monitor)
