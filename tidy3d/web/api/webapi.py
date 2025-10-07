@@ -242,8 +242,6 @@ def run(
             simulation=sim_for_cache
         )
         data = _get_simulation_data_from_cache_entry(entry, path)
-        if data is not None:
-            return data
 
     if data is None: # got no data from cache
         task_id = upload(
@@ -1019,8 +1017,8 @@ def load(
     replace_existing: bool = True,
     verbose: bool = True,
     progress_callback: Optional[Callable[[float], None]] = None,
-    use_cache: Optional[bool] = None,
-    lazy: bool = False,
+    use_cache: bool = False,
+    from_cache: bool = False,
 ) -> WorkflowDataType:
     """
     Download and Load simulation results into :class:`.SimulationData` object.
@@ -1067,18 +1065,11 @@ def load(
         base_dir = os.path.dirname(path) or "."
         path = os.path.join(base_dir, "cm_data.hdf5")
 
-    simulation_cache = _resolve_cache(use_cache)
-    data = None
-    if simulation_cache is not None:
-        entry = simulation_cache.try_fetch_by_task(
-            task_id=task_id, verbose=verbose
-        )
-        data = _get_simulation_data_from_cache_entry(entry, path)
-        if data is not None:
-            return data
-
-    if not data and (not os.path.exists(path) or replace_existing):
-        download(task_id=task_id, path=path, verbose=verbose, progress_callback=progress_callback)
+    if from_cache:
+        if not os.path.exists(path):
+            raise FileNotFoundError("Cached file not found.")
+    elif not os.path.exists(path) or replace_existing:
+            download(task_id=task_id, path=path, verbose=verbose, progress_callback=progress_callback)
 
     if verbose:
         console = get_logging_console()
@@ -1089,7 +1080,9 @@ def load(
 
     stub_data = Tidy3dStubData.postprocess(path, lazy=lazy)
 
-    if simulation_cache is not None:
+
+    simulation_cache = _resolve_cache(use_cache)
+    if simulation_cache is not None and not from_cache:
         info = get_info(task_id, verbose=False)
         workflow_type = getattr(info, "taskType", None) or type(stub_data).__name__
         simulation_cache.store_result(

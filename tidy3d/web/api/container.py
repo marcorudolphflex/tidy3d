@@ -268,9 +268,7 @@ class Job(WebContainer):
             sim_for_cache = self.simulation
             if isinstance(self.simulation, (ModeSolver, ModeSimulation)) and self.reduce_simulation:
                 sim_for_cache = get_reduced_simulation(self.simulation, self.reduce_simulation)
-            entry = simulation_cache.try_fetch(
-                simulation=sim_for_cache, register_if_found=True
-            )
+            entry = simulation_cache.try_fetch(simulation=sim_for_cache)
             return entry
         return None
 
@@ -299,21 +297,15 @@ class Job(WebContainer):
         """
         self._check_path_dir(path=path)
 
-        data = None
-        entry = self.get_cache_hit_entry()
-        if entry is not None:
-            data = _get_simulation_data_from_cache_entry(entry, path)
-            if data is not None:
-                return data
-
-        if data is None: # got no data from cache
+        loaded_from_cache = self.load_if_cached
+        if not loaded_from_cache:
             self.upload()
             if priority is None:
                 self.start()
             else:
                 self.start(priority=priority)
             self.monitor()
-            data = self.load(path=path, use_cache=use_cache)
+        data = self.load(path=path)
 
         return data
 
@@ -343,7 +335,10 @@ class Job(WebContainer):
                 entry = self.get_cache_hit_entry()
                 if entry is not None:
                     entry.materialize(Path(path))
+                    print(f"+ {self.task_name} found")
                     return True
+
+        print(f"X {self.task_name} NOT found")
         return False
 
     @cached_property
@@ -600,6 +595,12 @@ class BatchData(Tidy3dBaseModel, Mapping):
     verbose: bool = pd.Field(
         True, title="Verbose", description="Whether to print info messages and progressbars."
     )
+    cached_tasks: Optional[dict[TaskName, bool]] = pd.Field(
+        None,
+        title="Cached Tasks",
+        description="Whether the data of a task came from the cache.",
+    )
+
     use_cache: Optional[bool] = pd.Field(
         None,
         title="Use Cache",
@@ -610,9 +611,10 @@ class BatchData(Tidy3dBaseModel, Mapping):
         """Load a simulation data object from file by task name."""
         task_data_path = self.task_paths[task_name]
         task_id = self.task_ids[task_name]
+        from_cache = self.cached_tasks[task_name] if self.cached_tasks else False
         web.get_info(task_id)
 
-        return web.load(task_id=task_id, path=task_data_path, verbose=False, use_cache=self.use_cache)
+        return web.load(task_id=task_id, path=task_data_path, verbose=False, from_cache=from_cache, use_cache=self.use_cache, replace_existing=False)
 
     def __getitem__(self, task_name: TaskName) -> WorkflowDataType:
         """Get the simulation data object for a given ``task_name``."""
@@ -797,21 +799,16 @@ class Batch(WebContainer):
         rather it iterates over the task names and loads the corresponding
         data from file one by one. If no file exists for that task, it downloads it.
         """
-        jobs = self.jobs
-        loaded = list()
-        for task_name, job in jobs.items():
-            loaded.append(job.load_if_cached)
-        if all([l is not None for l in loaded]): # if all results were found in cache
-            return self.load(path_dir=path_dir)
-
-        self._check_path_dir(path_dir)
-        self.upload()
-        self.to_file(self._batch_path(path_dir=path_dir))
-        if priority is None:
-            self.start()
-        else:
-            self.start(priority=priority)
-        self.monitor()
+        loaded = [job.load_if_cached for job in self.jobs.values()]
+        if not all(loaded):
+            self._check_path_dir(path_dir)
+            self.upload()
+            self.to_file(self._batch_path(path_dir=path_dir))
+            if priority is None:
+                self.start()
+            else:
+                self.start(priority=priority)
+            self.monitor()
         return self.load(path_dir=path_dir)
 
     @cached_property
@@ -1233,7 +1230,8 @@ class Batch(WebContainer):
             task_paths[task_name] = self._job_data_path(task_id=job.task_id, path_dir=path_dir)
             task_ids[task_name] = self.jobs[task_name].task_id
 
-        data = BatchData(task_paths=task_paths, task_ids=task_ids, verbose=self.verbose, use_cache=self.use_cache)
+        loaded = {task_name: job.load_if_cached for task_name, job in self.jobs.items()}
+        data = BatchData(task_paths=task_paths, task_ids=task_ids, verbose=self.verbose, cached_tasks=loaded, use_cache=self.use_cache)
 
         for task_name, job in self.jobs.items():
             if isinstance(job.simulation, ModeSolver):
