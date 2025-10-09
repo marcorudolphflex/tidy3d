@@ -1,22 +1,28 @@
-from typing import TypeAlias, Union, Optional, Callable, Literal
+from __future__ import annotations
 
+from tidy3d.web.api.autograd.autograd import run as run_autograd, run_async
+from tidy3d.web.api.autograd.constants import LOCAL_GRADIENT
+from tidy3d.web.api.webapi import _modesolver_patch
+
+import typing
+from tidy3d.components.autograd.constants import (
+    MAX_NUM_ADJOINT_PER_FWD,
+)
 from tidy3d.components.types.workflow import WorkflowDataType, WorkflowType
-from tidy3d.web.api.container import BatchData, Batch
-from tidy3d.web.api.connect_util import wait_for_connection
-from tidy3d.web.api.webapi import _modesolver_patch, upload, start, monitor, load
 from tidy3d.web.core.types import PayType
 
-RunInput: TypeAlias = Union[
+RunInput: typing.TypeAlias = typing.Union[
     WorkflowType,
     list["RunInput"],
     tuple["RunInput", ...],
-    dict[str, "RunInput"],
+    dict[typing.Hashable, "RunInput"],
 ]
-RunOutput: TypeAlias = Union[
+
+RunOutput: typing.TypeAlias = typing.Union[
     WorkflowDataType,
     list["WorkflowDataType"],
     tuple["WorkflowDataType", ...],
-    dict[str, "WorkflowDataType"],
+    dict[typing.Hashable, "WorkflowDataType"],
 ]
 
 def _collect_by_hash(
@@ -30,11 +36,13 @@ def _collect_by_hash(
     if isinstance(node, WorkflowType):
         found[str(hash(node))] = node
         return found
-    if isinstance(node, list) or isinstance(node, tuple):
+    if isinstance(node, (list, tuple)):
         for v in node:
             _collect_by_hash(v, found)
         return found
     if isinstance(node, dict):
+        if any(isinstance(k, WorkflowType) for k in node.keys()):
+            raise ValueError("Dict keys must not be simulations.")
         for v in node.values():
             _collect_by_hash(v, found)
         return found
@@ -45,163 +53,198 @@ def _reconstruct_by_hash(node: RunInput, h2data: dict[str, WorkflowDataType]) ->
     """Ersetzt jedes Blatt (Simulation) durch sein Data-Objekt anhand des Hashes."""
     if isinstance(node, WorkflowType):
         return h2data[str(hash(node))]
-    if isinstance(node, (list, tuple)):
+    if isinstance(node, tuple):
         return tuple(_reconstruct_by_hash(v, h2data) for v in node)
+    if isinstance(node, list):
+        return list(_reconstruct_by_hash(v, h2data) for v in node)
     if isinstance(node, dict):
         return {k: _reconstruct_by_hash(v, h2data) for k, v in node.items()}
     raise TypeError(f"Unsupported element in reconstruction: {type(node)!r}")
 
 
-
-@wait_for_connection
 def run(
     simulation: RunInput,
-    task_name: Optional[str] = None,
+    task_name: typing.Optional[str] = None,
     folder_name: str = "default",
-    path: str = "simulation_data.hdf5",
-    callback_url: Optional[str] = None,
+    path: str = "simulation_data",
+    callback_url: typing.Optional[str] = None,
     verbose: bool = True,
-    progress_callback_upload: Optional[Callable[[float], None]] = None,  # wird im Batch nicht genutzt
-    progress_callback_download: Optional[Callable[[float], None]] = None, # wird im Batch nicht genutzt
-    solver_version: Optional[str] = None,
-    worker_group: Optional[str] = None,  # Batch-level, falls unterstützt
+    progress_callback_upload: typing.Optional[typing.Callable[[float], None]] = None,
+    progress_callback_download: typing.Optional[typing.Callable[[float], None]] = None,
+    solver_version: typing.Optional[str] = None,
+    worker_group: typing.Optional[str] = None,
     simulation_type: str = "tidy3d",
-    parent_tasks: Optional[dict[str, list[str]]] = None,  # falls du Parent-Graph per Namen hast
-    reduce_simulation: Literal["auto", True, False] = "auto",
-    pay_type: Union[PayType, str] = PayType.AUTO,
-    priority: Optional[int] = None,
-) -> RunOutput | WorkflowDataType:
+    parent_tasks: typing.Optional[list[str]] = None,
+    local_gradient: bool = LOCAL_GRADIENT,
+    max_num_adjoint_per_fwd: int = MAX_NUM_ADJOINT_PER_FWD,
+    reduce_simulation: typing.Literal["auto", True, False] = "auto",
+    pay_type: typing.Union[PayType, str] = PayType.AUTO,
+    priority: typing.Optional[int] = None,
+    max_workers: typing.Optional[int] = None,
+    lazy: typing.Optional[bool] = None,
+) -> RunOutput:
     """
-    Submits a :class:`.Simulation` to server, starts running, monitors progress, downloads,
-    and loads results as a :class:`.WorkflowDataType` object.
+    Submit one or many simulations and return results in the same container shape.
+
+    This is a convenience wrapper around the autograd runners that accepts a single
+    :class:`WorkflowType` **or** an arbitrarily nested container of simulations
+    (`list`, `tuple`, or `dict` values). Internally, all simulations are collected,
+    deduplicated by object hash, executed either synchronously (single) or
+    asynchronously (batch), and the returned data objects are reassembled to mirror
+    the input structure.
+
+    **Path behavior**
+      - **Single simulation:** results are downloaded to ``f"{path}.hdf5"``.
+      - **Multiple simulations:** ``path`` is treated as a **directory**, and each
+        task will write its own results file inside that directory.
+
+    **Lazy loading**
+      - If ``lazy`` is *not* specified: single runs default to ``False`` (eager load);
+        batch runs default to ``True`` (proxy objects that load on first access).
 
     Parameters
     ----------
-    simulation : Union[:class:`.Simulation`, :class:`.HeatSimulation`, :class:`.EMESimulation`]
-        Simulation to upload to server.
-    task_name : Optional[str] = None
-        Name of task. If not provided, a default name will be generated.
-    folder_name : str = "default"
-        Name of folder to store task on web UI.
-    path : str = "simulation_data.hdf5"
-        Path to download results file (.hdf5), including filename.
-    callback_url : str = None
-        Http PUT url to receive simulation finish event. The body content is a json file with
-        fields ``{'id', 'status', 'name', 'workUnit', 'solverVersion'}``.
-    verbose : bool = True
-        If ``True``, will print progressbars and status, otherwise, will run silently.
-    simulation_type : str = "tidy3d"
-        Type of simulation being uploaded.
-    progress_callback_upload : Callable[[float], None] = None
-        Optional callback function called when uploading file with ``bytes_in_chunk`` as argument.
-    progress_callback_download : Callable[[float], None] = None
-        Optional callback function called when downloading file with ``bytes_in_chunk`` as argument.
-    solver_version: str = None
-        target solver version.
-    worker_group: str = None
-        worker group
-    reduce_simulation : Literal["auto", True, False] = "auto"
-        Whether to reduce structures in the simulation to the simulation domain only. Note: currently only implemented for the mode solver.
-    pay_type: Union[PayType, str] = PayType.AUTO
-        Which method to pay the simulation.
-    priority: int = None
-        Priority of the simulation in the Virtual GPU (vGPU) queue (1 = lowest, 10 = highest).
-        It affects only simulations from vGPU licenses and does not impact simulations using FlexCredits.
+    simulation : Union[:class:`.Simulation`, :class:`.HeatSimulation`, :class:`.EMESimulation`] | list | tuple | dict
+        A simulation or a container whose leaves are simulations.
+        Supported containers are ``list``, ``tuple``, and ``dict`` (values only).
+        Dict **keys must not** be simulations.
+    task_name : Optional[str], default None
+        Optional name for a single run. Ignored for batch runs (hash strings are used).
+    folder_name : str, default "default"
+        Folder shown on the web UI.
+    path : str, default "simulation_data"
+        Output path. File stem for single runs (``.hdf5`` is appended), or a
+        directory for batch runs.
+    callback_url : Optional[str], default None
+        Optional HTTP PUT endpoint to receive completion events.
+    verbose : bool, default True
+        If ``True``, print status and progress; otherwise run quietly.
+    progress_callback_upload : Optional[Callable[[float], None]], default None
+        Callback invoked with byte counts during upload (single-run path only).
+    progress_callback_download : Optional[Callable[[float], None]], default None
+        Callback invoked with byte counts during download (single-run path only).
+    solver_version : Optional[str], default None
+        Target solver version.
+    worker_group : Optional[str], default None
+        Worker group to target.
+    simulation_type : str, default "tidy3d"
+        Simulation type label passed through to the runners.
+    parent_tasks : Optional[List[str]], default None
+        Parent task IDs, if any.
+    local_gradient : bool, default ``LOCAL_GRADIENT``
+        Compute gradients locally (more downloads; useful for experimental features).
+    max_num_adjoint_per_fwd : int, default ``MAX_NUM_ADJOINT_PER_FWD``
+        Maximum number of adjoint simulations allowed per forward run.
+    reduce_simulation : {"auto", True, False}, default "auto"
+        Whether to reduce structures to the simulation domain (mode solver only).
+    pay_type : Union[PayType, str], default PayType.AUTO
+        Payment method selection.
+    priority : Optional[int], default None
+        Queue priority for vGPU (1 = lowest, 10 = highest).
+    max_workers : Optional[int], default None
+        Maximum parallel submissions for batch runs. ``None`` submits all at once.
+    lazy : Optional[bool], default None
+        If provided, overrides the lazy/eager behavior described above.
+
     Returns
     -------
-    Union[:class:`.SimulationData`, :class:`.HeatSimulationData`, :class:`.EMESimulationData`]
-        Object containing solver results for the supplied simulation.
+    RunOutput
+        A data object (or nested container of data objects) matching the input
+        container shape. Leaves are instances of the corresponding
+        :class:`WorkflowDataType`.
 
     Notes
     -----
+    - Simulations are indexed by ``hash(sim)``. If the *same object* appears multiple
+      times in the input, it is executed once and its data is reused at all positions.
+      The *last* occurrence wins if duplicates with the same hash are encountered.
+    - For each simulation, a mode-solver compatibility patch is applied so that
+      the returned data exposes expected convenience attributes.
+    - ``progress_callback_*`` are only used in the single-run code path.
 
-        Submitting a simulation to our cloud server is very easily done by a simple web API call.
-
-        .. code-block:: python
-
-            sim_data = tidy3d.web.api.webapi.run(simulation, task_name='my_task', path='out/data.hdf5')
-
-        The :meth:`tidy3d.web.api.webapi.run()` method shows the simulation progress by default.  When uploading a
-        simulation to the server without running it, you can use the :meth:`tidy3d.web.api.webapi.monitor`,
-        :meth:`tidy3d.web.api.container.Job.monitor`, or :meth:`tidy3d.web.api.container.Batch.monitor` methods to
-        display the progress of your simulation(s).
+    Raises
+    ------
+    ValueError
+        If no simulations are found in ``simulation``.
+    TypeError
+        If an unsupported container element is encountered, or if a dict key is a
+        simulation object.
 
     Examples
     --------
+    Single run (eager by default)::
 
-        To access the original :class:`.Simulation` object that created the simulation data you can use:
+        sim_data = run(sim, task_name="wg_bend", path="out/bend")
+        # writes: "out/bend.hdf5"
 
-        .. code-block:: python
+    Batch run with nested structure (lazy by default)::
 
-            # Run the simulation.
-            sim_data = web.run(simulation, task_name='task_name', path='out/sim.hdf5')
+        sims = {
+            "coarse": [sim_a, sim_b],
+            "fine": (sim_c, sim_d),
+        }
+        data = run(sims, path="out/batch_dir", max_workers=4)
 
-            # Get a copy of the original simulation object.
-            sim_copy = sim_data.simulation
+        # 'data' mirrors 'sims' structure:
+        # data["coarse"][0] -> data for sim_a, etc.
 
     See Also
     --------
-
-    :meth:`tidy3d.web.api.webapi.monitor`
-        Print the real time task progress until completion.
-
-    :meth:`tidy3d.web.api.container.Job.monitor`
-        Monitor progress of running :class:`Job`.
-
-    :meth:`tidy3d.web.api.container.Batch.monitor`
-        Monitor progress of each of the running tasks.
+    tidy3d.web.api.autograd.autograd.run
+        Underlying autograd single-run implementation.
+    tidy3d.web.api.autograd.autograd.run_async
+        Underlying autograd batch submission implementation.
     """
-    if isinstance(simulation, WorkflowType):
-        task_id = upload(
-            simulation=simulation,
+    h2sim: dict[str, WorkflowType] = _collect_by_hash(simulation)
+    if not h2sim:
+        raise ValueError("No simulation data found in simulation input.")
+
+    if len(h2sim) == 1:
+        hash_key, sim = next(iter(h2sim.items()))
+        data = {hash_key: run_autograd(
+            simulation=sim,
             task_name=task_name,
             folder_name=folder_name,
+            path=f"{path}.hdf5",
             callback_url=callback_url,
             verbose=verbose,
-            progress_callback=progress_callback_upload,
-            simulation_type=simulation_type,
-            parent_tasks=parent_tasks,
-            solver_version=solver_version,
-            reduce_simulation=reduce_simulation,
-        )
-        start(
-            task_id,
-            verbose=verbose,
+            progress_callback_upload=progress_callback_upload,
+            progress_callback_download=progress_callback_download,
             solver_version=solver_version,
             worker_group=worker_group,
+            simulation_type=simulation_type,
+            parent_tasks=parent_tasks,
+            local_gradient=local_gradient,
+            max_num_adjoint_per_fwd=max_num_adjoint_per_fwd,
+            reduce_simulation=reduce_simulation,
             pay_type=pay_type,
             priority=priority,
-        )
-        monitor(task_id, verbose=verbose)
-        data = load(
-            task_id=task_id, path=path, verbose=verbose, progress_callback=progress_callback_download
-        )
-        _modesolver_patch(simulation, data)
+            lazy=lazy or False,
+        )}
     else:
-        h2sim: dict[str, WorkflowType] = _collect_by_hash(simulation)
-        if not h2sim:
-            raise ValueError("No simulation data found in simulation input.")
-
-        name2sim: dict[str, WorkflowType] = {h: s for h, s in h2sim.items()}
-
-        batch = Batch(
-            simulations=name2sim,
+        data = run_async(
+            simulations=h2sim,
             folder_name=folder_name,
+            path_dir=path,
             callback_url=callback_url,
+            num_workers=max_workers,
             verbose=verbose,
             simulation_type=simulation_type,
             solver_version=solver_version,
             parent_tasks=parent_tasks,
+            local_gradient = LOCAL_GRADIENT,
+            max_num_adjoint_per_fwd = MAX_NUM_ADJOINT_PER_FWD,
             reduce_simulation=reduce_simulation,
             pay_type=pay_type,
+            priority=priority,
+            lazy=lazy or True,
         )
-        batch_data: BatchData = batch.run(path_dir=path, priority=priority)
 
-        h2data: dict[str, WorkflowDataType] = {}
-        for h, sim_obj in h2sim.items():
-            sim_data: WorkflowDataType = batch_data[h]
-            _modesolver_patch(sim_obj, sim_data)
-            h2data[h] = sim_data
-            print(f"type data {type(sim_data)}")
+    h2data: dict[str, WorkflowDataType] = {}
+    for h, sim_obj in h2sim.items():
+        sim_data: WorkflowDataType = data[h]
+        _modesolver_patch(sim_obj, sim_data)
+        h2data[h] = sim_data
+        print(f"type data {type(sim_data)}")
 
-        return _reconstruct_by_hash(simulation, h2data)
+    return _reconstruct_by_hash(simulation, h2data)

@@ -212,6 +212,10 @@ class Job(WebContainer):
         description="Specify the payment method.",
     )
 
+    lazy: bool = pd.Field(
+        False, title="Lazy", description="Whether to load the actual data (lazy=False) or return a proxy that loads the data when accessed (lazy=True)."
+    )
+
     _upload_fields = (
         "simulation",
         "task_name",
@@ -369,7 +373,7 @@ class Job(WebContainer):
             Object containing simulation results.
         """
         self._check_path_dir(path=path)
-        data = web.load(task_id=self.task_id, path=path, verbose=self.verbose)
+        data = web.load(task_id=self.task_id, path=path, verbose=self.verbose, lazy=self.lazy)
         if isinstance(self.simulation, ModeSolver):
             self.simulation._patch_data(data=data)
         return data
@@ -625,6 +629,10 @@ class Batch(WebContainer):
         "so that ``jobs`` is written when ``Batch.to_file()`` and then the proper task is loaded "
         "from ``Batch.from_file()``. We recommend leaving unset as setting this field along with "
         "fields that were not used to create the task will cause errors.",
+    )
+
+    lazy: bool = pd.Field(
+        False, title="Lazy", description="Whether to load the actual data (lazy=False) or return a proxy that loads the data when accessed (lazy=True)."
     )
 
     _job_type = Job
