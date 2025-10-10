@@ -314,7 +314,7 @@ def _task_dict_to_url_bullet_list(data_dict: dict) -> str:
     return "\n".join([f"- {key}: '{value}'" for key, value in data_dict.items()])
 
 
-def _get_simulation_data_from_cache_entry(entry: CacheEntry, path: str) -> bool:
+def _copy_simulation_data_from_cache_entry(entry: CacheEntry, path: str) -> bool:
     if entry is not None:
         try:
             entry.materialize(Path(path))
@@ -327,18 +327,39 @@ def _get_simulation_data_from_cache_entry(entry: CacheEntry, path: str) -> bool:
 def restore_simulation_if_cached(
     simulation: WorkflowType,
     path: str,
-    use_cache: Optional[bool],
-    reduce_simulation: Literal["auto", True, False],
+    use_cache: Optional[bool] = None,
+    reduce_simulation: Literal["auto", True, False] = "auto",
 ) -> bool:
     simulation_cache = resolve_simulation_cache(use_cache)
-    loaded_from_cache = False
+    copied_from_cache = False
     if simulation_cache is not None:
         sim_for_cache = simulation
         if isinstance(simulation, (ModeSolver, ModeSimulation)):
             sim_for_cache = get_reduced_simulation(simulation, reduce_simulation)
         entry = simulation_cache.try_fetch(simulation=sim_for_cache)
-        loaded_from_cache = _get_simulation_data_from_cache_entry(entry, path)
-    return loaded_from_cache
+        if entry is not None:
+            copied_from_cache = _copy_simulation_data_from_cache_entry(entry, path)
+    return copied_from_cache
+
+
+def load_simulation_if_cached(
+    simulation: WorkflowType,
+    path: str,
+    use_cache: Optional[bool] = None,
+    reduce_simulation: Literal["auto", True, False] = "auto",
+) -> Optional[WorkflowDataType]:
+    restored = restore_simulation_if_cached(simulation, path, use_cache, reduce_simulation)
+    if restored:
+        data = load(
+            task_id=None,
+            path=path,
+            from_cache=True,
+        )
+        if isinstance(simulation, ModeSolver):
+            simulation._patch_data(data=data)
+        return data
+    else:
+        return None
 
 
 @wait_for_connection
@@ -448,11 +469,11 @@ def run(
     :meth:`tidy3d.web.api.container.Batch.monitor`
         Monitor progress of each of the running tasks.
     """
-    loaded_from_cache = restore_simulation_if_cached(
+    copied_from_cache = restore_simulation_if_cached(
         simulation=simulation, path=path, use_cache=use_cache, reduce_simulation=reduce_simulation
     )
 
-    if not loaded_from_cache:
+    if not copied_from_cache:
         task_id = upload(
             simulation=simulation,
             task_name=task_name,
@@ -483,7 +504,7 @@ def run(
         verbose=verbose,
         progress_callback=progress_callback_download,
         use_cache=use_cache,
-        from_cache=loaded_from_cache,
+        from_cache=copied_from_cache,
         lazy=lazy,
     )
 
