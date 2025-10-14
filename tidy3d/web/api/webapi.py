@@ -329,6 +329,7 @@ def restore_simulation_if_cached(
     path: str,
     use_cache: Optional[bool] = None,
     reduce_simulation: Literal["auto", True, False] = "auto",
+    verbose: bool = True,
 ) -> bool:
     simulation_cache = resolve_simulation_cache(use_cache)
     copied_from_cache = False
@@ -336,9 +337,18 @@ def restore_simulation_if_cached(
         sim_for_cache = simulation
         if isinstance(simulation, (ModeSolver, ModeSimulation)):
             sim_for_cache = get_reduced_simulation(simulation, reduce_simulation)
-        entry = simulation_cache.try_fetch(simulation=sim_for_cache)
+        entry = simulation_cache.try_fetch(simulation=sim_for_cache, verbose=verbose)
         if entry is not None:
             copied_from_cache = _copy_simulation_data_from_cache_entry(entry, path)
+            cached_task_id = entry.metadata.get("task_id")
+            cached_workflow_type = entry.metadata.get("workflow_type")
+            if cached_task_id is not None and cached_workflow_type is not None and verbose:
+                console = get_logging_console() if verbose else None
+                url, _ = _get_task_urls(
+                        cached_workflow_type,
+                        simulation,
+                        cached_task_id)
+                console.log(f"Loaded simulation from local cache.\nView cached task using web UI at [link={url}]'{url}'[/link].")
     return copied_from_cache
 
 
@@ -470,7 +480,7 @@ def run(
         Monitor progress of each of the running tasks.
     """
     copied_from_cache = restore_simulation_if_cached(
-        simulation=simulation, path=path, use_cache=use_cache, reduce_simulation=reduce_simulation
+        simulation=simulation, path=path, use_cache=use_cache, reduce_simulation=reduce_simulation, verbose=verbose
     )
 
     if not copied_from_cache:
@@ -511,6 +521,26 @@ def run(
     if isinstance(simulation, ModeSolver):
         simulation._patch_data(data=data)
     return data
+
+def _get_task_urls(
+    task_type: str,
+    simulation: WorkflowType,
+    resource_id: str,
+    folder_id: Optional[str] = None,
+    group_id: Optional[str] = None,
+) -> tuple[str, Optional[str]]:
+    """Log task and folder links to the web UI."""
+    print("task_type:", task_type)
+    if (task_type in ["RF", "COMPONENT_MODELER", "TERMINAL_COMPONENT_MODELER"]) and isinstance(simulation, TerminalComponentModeler):
+        url = _get_url_rf(group_id or resource_id)
+    else:
+        url = _get_url(resource_id)
+
+    if folder_id is not None:
+        folder_url = _get_folder_url(folder_id)
+    else:
+        folder_url = None
+    return url, folder_url
 
 
 @wait_for_connection
@@ -633,16 +663,9 @@ def upload(
                 f"Cost of {solver_name} simulations is subject to change in the future."
             )
         if task_type in GUI_SUPPORTED_TASK_TYPES:
-            if (task_type == "RF") and (isinstance(simulation, TerminalComponentModeler)):
-                url = _get_url_rf(group_id or resource_id)
-                folder_url = _get_folder_url(task.folder_id)
-                console.log(f"View task using web UI at [link={url}]'{url}'[/link].")
-                console.log(f"Task folder: [link={folder_url}]'{task.folder_name}'[/link].")
-            else:
-                url = _get_url(resource_id)
-                folder_url = _get_folder_url(task.folder_id)
-                console.log(f"View task using web UI at [link={url}]'{url}'[/link].")
-                console.log(f"Task folder: [link={folder_url}]'{task.folder_name}'[/link].")
+            url, folder_url = _get_task_urls(task_type, simulation, resource_id, task.folder_id, group_id)
+            console.log(f"View task using web UI at [link={url}]'{url}'[/link].")
+            console.log(f"Task folder: [link={folder_url}]'{task.folder_name}'[/link].")
 
     remote_sim_file = SIM_FILE_HDF5_GZ
     if task_type == "MODE_SOLVER":
