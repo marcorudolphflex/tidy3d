@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import ssl
 from typing import Any, Literal, Optional
 from urllib.parse import urlparse
@@ -13,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, PositiveInt, SecretStr, field
 from tidy3d.log import DEFAULT_LEVEL, LogLevel, set_log_suppression, set_logging_level
 from tidy3d.packaging import set_use_local_subpixel
 
+from .env_utils import apply_environment, restore_environment
 from .registry import register_handler, register_section
 
 
@@ -322,18 +322,9 @@ class WebConfig(ConfigSection):
 def apply_web(config: WebConfig) -> None:
     """Apply web-related environment variable overrides."""
 
-    # restore previous values
-    for key, previous in _PREVIOUS_WEB_ENV.items():
-        if previous is None:
-            os.environ.pop(key, None)
-        else:
-            os.environ[key] = previous
-    _PREVIOUS_WEB_ENV.clear()
-
-    if config.env_vars:
-        for key, value in config.env_vars.items():
-            _PREVIOUS_WEB_ENV[key] = os.environ.get(key)
-            os.environ[key] = value
+    global _PREVIOUS_WEB_ENV
+    restore_environment(_PREVIOUS_WEB_ENV)
+    _PREVIOUS_WEB_ENV = apply_environment(config.env_vars) if config.env_vars else {}
 
 
 @register_section("plugins")

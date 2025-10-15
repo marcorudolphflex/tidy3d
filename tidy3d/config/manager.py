@@ -4,34 +4,38 @@ from __future__ import annotations
 
 import os
 import shutil
-from collections import defaultdict
 from collections.abc import Iterable
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Optional, get_args, get_origin
+from typing import Any, Optional, TypeAlias, get_args, get_origin
 
 from pydantic import BaseModel
 
 from tidy3d.log import log
 
-from .loader import (
-    ConfigLoader,
-    deep_diff,
-    deep_merge,
-    load_environment_overrides,
-)
+from .layers import ConfigLayers
+from .loader import ConfigLoader, deep_diff, deep_merge, load_environment_overrides
 from .profiles import BUILTIN_PROFILES
 from .registry import attach_manager, get_handlers, get_sections
+
+Tree: TypeAlias = dict[str, Any]
+PLUGINS_KEY = "plugins"
+PLUGIN_PREFIX = f"{PLUGINS_KEY}."
 
 
 def normalize_profile_name(name: str) -> str:
     """Return a canonical profile name for builtin profiles."""
-
     normalized = name.strip()
     lowered = normalized.lower()
-    if lowered in BUILTIN_PROFILES:
-        return lowered
-    return normalized
+    return lowered if lowered in BUILTIN_PROFILES else normalized
+
+
+def _is_plugin_section(name: str) -> bool:
+    return name.startswith(PLUGIN_PREFIX)
+
+
+def _plugin_name(name: str) -> str:
+    return name.split(".", 1)[1]
 
 
 class SectionAccessor:
@@ -73,7 +77,7 @@ class PluginsAccessor:
     def __getattr__(self, plugin: str) -> SectionAccessor:
         if plugin not in self._manager._plugin_models:
             raise AttributeError(f"Plugin '{plugin}' is not registered")
-        return SectionAccessor(self._manager, f"plugins.{plugin}")
+        return SectionAccessor(self._manager, f"{PLUGINS_KEY}.{plugin}")
 
     def list(self) -> Iterable[str]:
         return sorted(self._manager._plugin_models.keys())
@@ -93,29 +97,30 @@ class ProfilesAccessor:
 
 
 class ConfigManager:
-    """High-level orchestrator for tidy3d configuration."""
+    """High-level orchestrator for tidy3d configuration.
+
+    Responsibilities:
+      - Hold the active profile.
+      - Build/cache Pydantic models from the composed tree.
+      - Apply section handlers on changes.
+      - Persist diffs via ConfigLoader.
+      - Expose convenient attribute accessors.
+    """
 
     def __init__(
         self,
         profile: Optional[str] = None,
         config_dir: Optional[os.PathLike[str]] = None,
     ):
-        loader_path = None if config_dir is None else Path(config_dir)
-        self._loader = ConfigLoader(loader_path)
-        self._runtime_overrides: dict[str, dict[str, Any]] = defaultdict(dict)
+        self._loader = ConfigLoader(None if config_dir is None else Path(config_dir))
+        self._layers = ConfigLayers()
         self._plugin_models: dict[str, BaseModel] = {}
         self._section_models: dict[str, BaseModel] = {}
         self._profile = self._resolve_initial_profile(profile)
-        self._builtin_data: dict[str, Any] = {}
-        self._base_data: dict[str, Any] = {}
-        self._profile_data: dict[str, Any] = {}
-        self._raw_tree: dict[str, Any] = {}
-        self._effective_tree: dict[str, Any] = {}
-        self._env_overrides: dict[str, Any] = load_environment_overrides()
 
         attach_manager(self)
-        self._reload()
-        self._apply_handlers()
+        self._reload()            # load files + env into layers
+        self._apply_handlers()    # apply handlers on initial models
 
     # ------------------------------------------------------------------
     # Properties
@@ -125,7 +130,7 @@ class ConfigManager:
         return self._profile
 
     @property
-    def config_dir(self):
+    def config_dir(self) -> Path:
         return self._loader.config_dir
 
     @property
@@ -142,26 +147,18 @@ class ConfigManager:
     def update_section(self, name: str, **updates: Any) -> None:
         if not updates:
             return
-        segments = name.split(".")
-        overrides = self._runtime_overrides[self._profile]
-        previous = deepcopy(overrides)
-        node = overrides
-        for segment in segments[:-1]:
-            node = node.setdefault(segment, {})
-        section_key = segments[-1]
-        section_payload = node.setdefault(section_key, {})
-        for key, value in updates.items():
-            section_payload[key] = _serialize_value(value)
+        serialized = {k: _serialize_value(v) for k, v in updates.items()}
+        snapshot = self._layers.runtime_snapshot(self._profile)
         try:
+            self._layers.update_runtime(self._profile, name, serialized)
             self._reload()
         except Exception:
-            self._runtime_overrides[self._profile] = previous
+            self._layers.restore_runtime(self._profile, snapshot)
+            self._reload()
             raise
         self._apply_handlers(section=name)
 
     def switch_profile(self, profile: str) -> None:
-        if not profile:
-            raise ValueError("Profile name cannot be empty")
         normalized = normalize_profile_name(profile)
         if not normalized:
             raise ValueError("Profile name cannot be empty")
@@ -178,18 +175,17 @@ class ConfigManager:
         if self._profile == "default":
             self._loader.save_base(base_without_env)
         else:
-            baseline = self._filter_persisted(deep_merge(self._builtin_data, self._base_data))
-            diff = deep_diff(baseline, base_without_env)
-            self._loader.save_profile(self._profile, diff)
-        # refresh cached base/profile data after saving
-        self._base_data = self._loader.load_base()
-        self._profile_data = self._loader.load_user_profile(self._profile)
+            self._loader.load_user_profile(self._profile)
+            self._loader.save_profile(self._profile, base_without_env)
+
+        # refresh cached layers after saving
+        self._layers.set_base(self._loader.load_base())
+        self._layers.set_profile(self._profile, self._loader.load_user_profile(self._profile))
         self._reload()
 
     def reset_to_defaults(self, *, include_profiles: bool = True) -> None:
         """Reset configuration files to their default annotated state."""
-
-        self._runtime_overrides = defaultdict(dict)
+        self._layers.reset_runtime()
         defaults = self._filter_persisted(self._default_tree())
         self._loader.save_base(defaults)
 
@@ -211,19 +207,19 @@ class ConfigManager:
 
     def list_profiles(self) -> dict[str, list[str]]:
         profiles_dir = self._loader.config_dir / "profiles"
-        user_profiles = []
-        if profiles_dir.exists():
-            for path in profiles_dir.glob("*.toml"):
-                user_profiles.append(path.stem)
-        built_in = sorted(name for name in BUILTIN_PROFILES.keys())
-        return {"built_in": built_in, "user": sorted(user_profiles)}
+        user_profiles = sorted(p.stem for p in profiles_dir.glob("*.toml")) if profiles_dir.exists() else []
+        built_in = sorted(BUILTIN_PROFILES.keys())
+        return {"built_in": built_in, "user": user_profiles}
 
     def preview_profile(self, profile: str) -> dict[str, Any]:
-        builtin = self._loader.get_builtin_profile(profile)
-        base = self._loader.load_base()
-        overrides = self._loader.load_user_profile(profile)
-        view = deep_merge(builtin, base, overrides)
-        return deepcopy(view)
+        # Preview is “static”: builtin + base + user profile (no runtime/env)
+        return deepcopy(
+            deep_merge(
+                self._loader.get_builtin_profile(profile),
+                self._loader.load_base(),
+                self._loader.load_user_profile(profile),
+            )
+        )
 
     def get_section(self, name: str) -> BaseModel:
         model = self._get_model(name)
@@ -231,10 +227,10 @@ class ConfigManager:
             raise AttributeError(f"Section '{name}' is not available")
         return model
 
-    def as_dict(self, include_env: bool = True) -> dict[str, Any]:
-        if include_env:
-            return deepcopy(self._effective_tree)
-        return self._compose_without_env()
+    def as_dict(self, include_env: bool = True) -> Tree:
+        return deepcopy(
+            self._layers.compose(self._profile, include_env=include_env)
+        )
 
     # ------------------------------------------------------------------
     # Registry callbacks
@@ -252,7 +248,6 @@ class ConfigManager:
     def _resolve_initial_profile(self, profile: Optional[str]) -> str:
         if profile:
             return normalize_profile_name(str(profile))
-
         candidate = (
             os.getenv("TIDY3D_CONFIG_PROFILE")
             or os.getenv("TIDY3D_PROFILE")
@@ -262,15 +257,11 @@ class ConfigManager:
         return normalize_profile_name(candidate)
 
     def _reload(self) -> None:
-        self._env_overrides = load_environment_overrides()
-        self._builtin_data = deepcopy(self._loader.get_builtin_profile(self._profile))
-        self._base_data = deepcopy(self._loader.load_base())
-        self._profile_data = deepcopy(self._loader.load_user_profile(self._profile))
-        self._raw_tree = deep_merge(self._builtin_data, self._base_data, self._profile_data)
+        self._layers.set_builtin(self._profile, self._loader.get_builtin_profile(self._profile))
+        self._layers.set_base(self._loader.load_base())
+        self._layers.set_profile(self._profile, self._loader.load_user_profile(self._profile))
 
-        runtime = deepcopy(self._runtime_overrides.get(self._profile, {}))
-        effective = deep_merge(self._raw_tree, runtime, self._env_overrides)
-        self._effective_tree = effective
+        self._layers.set_env(load_environment_overrides())
         self._build_models()
 
     def _build_models(self) -> None:
@@ -278,34 +269,36 @@ class ConfigManager:
         self._section_models.clear()
         self._plugin_models.clear()
 
+        tree = self._layers.compose(self._profile, include_env=True)
+
         for name, schema in sections.items():
-            if name.startswith("plugins."):
-                plugin_name = name.split(".", 1)[1]
-                plugin_data = _deep_get(self._effective_tree, ("plugins", plugin_name)) or {}
-                try:
-                    self._plugin_models[plugin_name] = schema(**plugin_data)
-                except Exception as exc:  # pragma: no cover - validation guard
-                    log.error(f"Failed to load configuration for plugin '{plugin_name}': {exc}")
-                    raise
+            if name == PLUGINS_KEY:
+                # container key; no direct model
                 continue
-            if name == "plugins":
-                continue
-            section_data = self._effective_tree.get(name, {})
-            try:
-                self._section_models[name] = schema(**section_data)
-            except Exception as exc:  # pragma: no cover
-                log.error(f"Failed to load configuration for section '{name}': {exc}")
-                raise
+
+            if _is_plugin_section(name):
+                plugin = _plugin_name(name)
+                plugin_data = _deep_get(tree, (PLUGINS_KEY, plugin)) or {}
+                self._plugin_models[plugin] = self._build_one_model(schema, plugin_data, f"plugin '{plugin}'")
+            else:
+                section_data = tree.get(name, {}) or {}
+                self._section_models[name] = self._build_one_model(schema, section_data, f"section '{name}'")
+
+    def _build_one_model(self, schema: type[BaseModel], data: dict[str, Any], label: str) -> BaseModel:
+        try:
+            return schema(**data)
+        except Exception as exc:  # pragma: no cover - validation guard
+            log.error(f"Failed to load configuration for {label}: {exc}")
+            raise
 
     def _get_model(self, name: str) -> Optional[BaseModel]:
-        if name.startswith("plugins."):
-            plugin = name.split(".", 1)[1]
-            return self._plugin_models.get(plugin)
+        if _is_plugin_section(name):
+            return self._plugin_models.get(_plugin_name(name))
         return self._section_models.get(name)
 
     def _apply_handlers(self, section: Optional[str] = None) -> None:
         handlers = get_handlers()
-        targets = [section] if section else handlers.keys()
+        targets = [section] if section else list(handlers.keys())
         for target in targets:
             handler = handlers.get(target)
             if handler is None:
@@ -315,53 +308,52 @@ class ConfigManager:
                 continue
             try:
                 handler(model)
-            except Exception as exc:
+            except Exception as exc:  # keep handlers non-fatal
                 log.error(f"Failed to apply configuration handler for '{target}': {exc}")
 
-    def _compose_without_env(self) -> dict[str, Any]:
-        runtime = self._runtime_overrides.get(self._profile, {})
-        return deep_merge(self._raw_tree, runtime)
+    def _compose_without_env(self) -> Tree:
+        return self._layers.compose(self._profile, include_env=False)
 
-    def _default_tree(self) -> dict[str, Any]:
-        defaults: dict[str, Any] = {}
+    def _default_tree(self) -> Tree:
+        defaults: Tree = {}
         for name, schema in get_sections().items():
-            if name.startswith("plugins."):
-                plugin = name.split(".", 1)[1]
-                defaults.setdefault("plugins", {})[plugin] = _model_dict(schema())
-            elif name == "plugins":
-                defaults.setdefault("plugins", {})
+            if name == PLUGINS_KEY:
+                defaults.setdefault(PLUGINS_KEY, {})
+                continue
+            if _is_plugin_section(name):
+                plugin = _plugin_name(name)
+                defaults.setdefault(PLUGINS_KEY, {})[plugin] = _model_dict(schema())
             else:
                 defaults[name] = _model_dict(schema())
         return defaults
 
-    def _filter_persisted(self, tree: dict[str, Any]) -> dict[str, Any]:
+    def _filter_persisted(self, tree: Tree) -> Tree:
         sections = get_sections()
-        filtered: dict[str, Any] = {}
-        plugins_source = tree.get("plugins", {})
-        plugin_filtered: dict[str, Any] = {}
+        filtered: Tree = {}
+        plugins_source = tree.get(PLUGINS_KEY, {}) if isinstance(tree, dict) else {}
+        plugin_filtered: Tree = {}
 
         for name, schema in sections.items():
-            if name == "plugins":
+            if name == PLUGINS_KEY:
                 continue
-            if name.startswith("plugins."):
-                plugin_name = name.split(".", 1)[1]
+
+            if _is_plugin_section(name):
+                plugin_name = _plugin_name(name)
                 plugin_data = plugins_source.get(plugin_name, {})
-                if not isinstance(plugin_data, dict):
-                    continue
-                persisted_plugin = _extract_persisted(schema, plugin_data)
-                if persisted_plugin:
-                    plugin_filtered[plugin_name] = persisted_plugin
+                if isinstance(plugin_data, dict):
+                    persisted = _extract_persisted(schema, plugin_data)
+                    if persisted:
+                        plugin_filtered[plugin_name] = persisted
                 continue
 
             section_data = tree.get(name, {})
-            if not isinstance(section_data, dict):
-                continue
-            persisted_section = _extract_persisted(schema, section_data)
-            if persisted_section:
-                filtered[name] = persisted_section
+            if isinstance(section_data, dict):
+                persisted = _extract_persisted(schema, section_data)
+                if persisted:
+                    filtered[name] = persisted
 
         if plugin_filtered:
-            filtered["plugins"] = plugin_filtered
+            filtered[PLUGINS_KEY] = plugin_filtered
         return filtered
 
     # ------------------------------------------------------------------
@@ -370,7 +362,7 @@ class ConfigManager:
     def __getattr__(self, name: str) -> Any:
         if name in self._section_models:
             return SectionAccessor(self, name)
-        if name == "plugins":
+        if name == PLUGINS_KEY:
             return self.plugins
         raise AttributeError(f"Config has no section '{name}'")
 
@@ -391,9 +383,7 @@ class ConfigManager:
 # ----------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------
-
-
-def _deep_get(tree: dict[str, Any], path: Iterable[str]) -> Optional[dict[str, Any]]:
+def _deep_get(tree: Tree, path: Iterable[str]) -> Optional[dict[str, Any]]:
     node: Any = tree
     for segment in path:
         if not isinstance(node, dict):
@@ -406,7 +396,6 @@ def _deep_get(tree: dict[str, Any], path: Iterable[str]) -> Optional[dict[str, A
 
 def _resolve_model_type(annotation: Any) -> Optional[type[BaseModel]]:
     """Return the first BaseModel subclass found in an annotation (if any)."""
-
     if isinstance(annotation, type) and issubclass(annotation, BaseModel):
         return annotation
 

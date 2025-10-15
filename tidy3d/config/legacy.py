@@ -6,6 +6,7 @@ import os
 import ssl
 from typing import Any, Optional
 
+from .env_utils import apply_environment, restore_environment
 from .manager import ConfigManager, normalize_profile_name
 from .profiles import BUILTIN_PROFILES
 
@@ -301,17 +302,10 @@ class LegacyEnvironment:
     def _apply_env_vars(self, config: LegacyEnvironmentConfig) -> None:
         self._restore_env_vars()
         env_vars = config.env_vars or {}
-        self._previous_env_vars = {}
-        for key, value in env_vars.items():
-            self._previous_env_vars[key] = os.environ.get(key)
-            os.environ[key] = value
+        self._previous_env_vars = apply_environment(env_vars) if env_vars else {}
 
     def _restore_env_vars(self) -> None:
-        for key, previous in self._previous_env_vars.items():
-            if previous is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = previous
+        restore_environment(self._previous_env_vars)
         self._previous_env_vars = {}
 
 
