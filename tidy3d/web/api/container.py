@@ -34,9 +34,8 @@ from tidy3d.web.api.states import (
     RUNNING_STATES,
     STATE_PROGRESS_PERCENTAGE,
 )
-from tidy3d.web.api.tidy3d_stub import Tidy3dStub
 from tidy3d.web.api.tidy3d_stub import Tidy3dStub, Tidy3dStubData
-from tidy3d.web.api.webapi import _get_simulation_data_from_cache_entry, get_reduced_simulation
+from tidy3d.web.api.webapi import get_reduced_simulation, restore_simulation_if_cached
 from tidy3d.web.cache import TMP_BATCH_PREFIX, CacheEntry, resolve_simulation_cache
 from tidy3d.web.core.constants import TaskId, TaskName
 from tidy3d.web.core.task_core import Folder
@@ -235,12 +234,6 @@ class Job(WebContainer):
         description="Whether to load the actual data (lazy=False) or return a proxy that loads the data when accessed (lazy=True).",
     )
 
-    data_cache_path: str | None = pd.Field(
-        None,
-        title="Data Cache Path",
-        description="File where cache is copied to.",
-    )
-
     _upload_fields = (
         "simulation",
         "task_name",
@@ -342,12 +335,12 @@ class Job(WebContainer):
         if path is None:
             return False
         self._check_path_dir(path=path)
-        entry = self.get_cache_hit_entry()
-        if entry is not None:
-            loaded_from_cache = _get_simulation_data_from_cache_entry(entry, path)
-            if loaded_from_cache:
-                return True
-        return False
+        return restore_simulation_if_cached(
+            simulation=self.simulation,
+            path=path,
+            use_cache=self.use_cache,
+            reduce_simulation=self.reduce_simulation,
+        )
 
     @cached_property
     def task_id(self) -> TaskId:
@@ -502,7 +495,7 @@ class Job(WebContainer):
             path=path,
             verbose=self.verbose,
             use_cache=self.use_cache,
-            lazy=self.lazy
+            lazy=self.lazy,
         )
         if isinstance(self.simulation, ModeSolver):
             self.simulation._patch_data(data=data)
@@ -661,6 +654,12 @@ class BatchData(Tidy3dBaseModel, Mapping):
         description="Whether to load the actual data (lazy=False) or return a proxy that loads the data when accessed (lazy=True).",
     )
 
+    is_downloaded: Optional[bool] = pd.Field(
+        False,
+        title="Is Downloaded",
+        description="Whether the simulation data was downloaded before.",
+    )
+
     def load_sim_data(self, task_name: str) -> WorkflowDataType:
         """Load a simulation data object from file by task name."""
         task_data_path = self.task_paths[task_name]
@@ -675,8 +674,8 @@ class BatchData(Tidy3dBaseModel, Mapping):
             verbose=False,
             from_cache=from_cache,
             use_cache=self.use_cache,
-            replace_existing=False,
-            lazy=self.lazy
+            replace_existing=not (from_cache or self.is_downloaded),
+            lazy=self.lazy,
         )
 
     def __getitem__(self, task_name: TaskName) -> WorkflowDataType:
@@ -1403,21 +1402,24 @@ class Batch(WebContainer):
             task_ids[task_name] = self.jobs[task_name].task_id
 
         loaded = {task_name: job.load_if_cached for task_name, job in self.jobs.items()}
+
+        if not skip_download:
+            self.download(path_dir=path_dir, replace_existing=replace_existing)
+
         data = BatchData(
             task_paths=task_paths,
             task_ids=task_ids,
             verbose=self.verbose,
             cached_tasks=loaded,
             use_cache=self.use_cache,
-            lazy=self.lazy
+            lazy=self.lazy,
+            is_downloaded=True,
         )
 
         for task_name, job in self.jobs.items():
             if isinstance(job.simulation, ModeSolver):
                 job_data = data[task_name]
                 job.simulation._patch_data(data=job_data)
-        if not skip_download:
-            self.download(path_dir=path_dir, replace_existing=replace_existing)
 
         return data
 
