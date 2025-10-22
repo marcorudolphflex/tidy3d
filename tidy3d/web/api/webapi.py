@@ -344,11 +344,10 @@ def restore_simulation_if_cached(
             cached_workflow_type = entry.metadata.get("workflow_type")
             if cached_task_id is not None and cached_workflow_type is not None and verbose:
                 console = get_logging_console() if verbose else None
-                url, _ = _get_task_urls(
-                        cached_workflow_type,
-                        simulation,
-                        cached_task_id)
-                console.log(f"Loaded simulation from local cache.\nView cached task using web UI at [link={url}]'{url}'[/link].")
+                url, _ = _get_task_urls(cached_workflow_type, simulation, cached_task_id)
+                console.log(
+                    f"Loaded simulation from local cache.\nView cached task using web UI at [link={url}]'{url}'[/link]."
+                )
     return copied_from_cache
 
 
@@ -480,7 +479,11 @@ def run(
         Monitor progress of each of the running tasks.
     """
     copied_from_cache = restore_simulation_if_cached(
-        simulation=simulation, path=path, use_cache=use_cache, reduce_simulation=reduce_simulation, verbose=verbose
+        simulation=simulation,
+        path=path,
+        use_cache=use_cache,
+        reduce_simulation=reduce_simulation,
+        verbose=verbose,
     )
 
     if not copied_from_cache:
@@ -522,6 +525,7 @@ def run(
         simulation._patch_data(data=data)
     return data
 
+
 def _get_task_urls(
     task_type: str,
     simulation: WorkflowType,
@@ -531,7 +535,9 @@ def _get_task_urls(
 ) -> tuple[str, Optional[str]]:
     """Log task and folder links to the web UI."""
     print("task_type:", task_type)
-    if (task_type in ["RF", "COMPONENT_MODELER", "TERMINAL_COMPONENT_MODELER"]) and isinstance(simulation, TerminalComponentModeler):
+    if (task_type in ["RF", "COMPONENT_MODELER", "TERMINAL_COMPONENT_MODELER"]) and isinstance(
+        simulation, TerminalComponentModeler
+    ):
         url = _get_url_rf(group_id or resource_id)
     else:
         url = _get_url(resource_id)
@@ -663,7 +669,9 @@ def upload(
                 f"Cost of {solver_name} simulations is subject to change in the future."
             )
         if task_type in GUI_SUPPORTED_TASK_TYPES:
-            url, folder_url = _get_task_urls(task_type, simulation, resource_id, task.folder_id, group_id)
+            url, folder_url = _get_task_urls(
+                task_type, simulation, resource_id, task.folder_id, group_id
+            )
             console.log(f"View task using web UI at [link={url}]'{url}'[/link].")
             console.log(f"Task folder: [link={folder_url}]'{task.folder_name}'[/link].")
 

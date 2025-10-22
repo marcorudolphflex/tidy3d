@@ -306,9 +306,7 @@ class SimulationCache:
         with self._lock:
             return sum(1 for _ in self._iter_entries())
 
-    def _store(
-        self, key: str, source_path: Path, metadata: dict[str, Any]
-    ) -> Optional[CacheEntry]:
+    def _store(self, key: str, source_path: Path, metadata: dict[str, Any]) -> Optional[CacheEntry]:
         """Store a new cache entry from ``source_path``.
 
         Parameters
