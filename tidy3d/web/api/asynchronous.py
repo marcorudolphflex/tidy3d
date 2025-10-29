@@ -26,6 +26,7 @@ def run_async(
     pay_type: Union[PayType, str] = PayType.AUTO,
     priority: Optional[int] = None,
     lazy: bool = False,
+    use_cache: Optional[bool] = None,
 ) -> BatchData:
     """Submits a set of Union[:class:`.Simulation`, :class:`.HeatSimulation`, :class:`.EMESimulation`] objects to server,
     starts running, monitors progress, downloads, and loads results as a :class:`.BatchData` object.
@@ -61,6 +62,9 @@ def run_async(
     lazy : bool = False
         Whether to load the actual data (``lazy=False``) or return a proxy that loads
         the data when accessed (``lazy=True``).
+    use_cache: Optional[bool] = None
+        Whether to use local cache if identical simulation is rerun. If not provided, cache settings from config or
+        environment variables will be used.
 
     Returns
     ------
@@ -98,6 +102,7 @@ def run_async(
         reduce_simulation=reduce_simulation,
         pay_type=pay_type,
         lazy=lazy,
+        use_cache=use_cache,
     )
 
     batch_data = batch.run(path_dir=path_dir, priority=priority)
