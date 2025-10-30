@@ -26,7 +26,7 @@ from tidy3d.web.api.states import (
     POST_VALIDATE_STATES,
     STATE_PROGRESS_PERCENTAGE,
 )
-from tidy3d.web.cache import CacheEntry, resolve_local_cache
+from tidy3d.web.cache import CacheEntry, _store_mode_solver_in_cache, resolve_local_cache
 from tidy3d.web.core.account import Account
 from tidy3d.web.core.constants import (
     CM_DATA_HDF5_GZ,
@@ -575,7 +575,10 @@ def run(
     )
 
     if isinstance(simulation, ModeSolver):
+        if task_id is not None:
+            _store_mode_solver_in_cache(task_id, simulation, data, path)
         simulation._patch_data(data=data)
+
     return data
 
 
@@ -1414,11 +1417,22 @@ def load(
     if simulation_cache is not None and task_id is not None:
         info = get_info(task_id, verbose=False)
         workflow_type = getattr(info, "taskType", None)
+        simulation = None
+        if lazy:  # get simulation via web to avoid unpacking of lazy object in store_result
+            try:
+                with tempfile.NamedTemporaryFile(suffix=".json") as tmp_file:
+                    simulation = load_simulation(task_id, path=tmp_file.name, verbose=False)
+            except Exception as e:
+                log.info(
+                    f"Failed to load simulation for storing results: {e}.\nLazy object will be materialized."
+                )
+                return stub_data
         simulation_cache.store_result(
             stub_data=stub_data,
             task_id=task_id,
             path=path,
             workflow_type=workflow_type,
+            simulation=simulation,
         )
 
     return stub_data
