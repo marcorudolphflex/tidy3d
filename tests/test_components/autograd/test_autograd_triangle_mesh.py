@@ -308,22 +308,20 @@ def test_triangle_mesh_non_watertight_warns_and_computes(non_watertight_mesh, ca
     assert not non_watertight_mesh.trimesh.is_watertight
 
 
-def test_triangle_mesh_subdivision_respects_long_edges():
-    """Subdivision count should scale with the longest edge length."""
+def test_triangle_mesh_subdivision_respects_vertex_heights():
+    """Subdivision counts should follow vertex-to-edge orthogonal heights."""
 
     tri = VERTICES_SLENDER_TETRA[FACES_SLENDER_TETRA[0]]
     area, _ = area_and_normal(tri)
-    edge_lengths = (
-        np.linalg.norm(tri[1] - tri[0]),
-        np.linalg.norm(tri[2] - tri[1]),
-        np.linalg.norm(tri[0] - tri[2]),
-    )
 
     spacing = 0.05
-    subdivisions = td.TriangleMesh._subdivision_count(area, spacing, edge_lengths)
-    expected_min = int(np.ceil(max(edge_lengths) / spacing))
+    subdivisions = td.TriangleMesh._subdivision_count(area, spacing, triangle=tri)
+    heights = td.TriangleMesh._edge_heights(tri)
 
-    assert subdivisions >= expected_min
+    assert len(subdivisions) == 3
+    for height, count in zip(heights, subdivisions):
+        expected = 1 if height <= 0.0 else int(np.ceil(height / spacing))
+        assert count == expected
 
 
 def test_triangle_mesh_gradients_insensitive_to_face_splitting(watertight_mesh):

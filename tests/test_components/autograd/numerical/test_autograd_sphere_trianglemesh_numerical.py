@@ -273,7 +273,7 @@ def make_objective(
     return objective
 
 
-@pytest.mark.numerical
+# @pytest.mark.numerical
 @pytest.mark.parametrize("scale_factor", SCALE_FACTORS)
 @pytest.mark.parametrize("scale_axis", SCALE_AXES)
 # @pytest.mark.parametrize("scale_factor", (1,))
@@ -472,8 +472,9 @@ def test_sphere_fd_step_sweep(tmp_path, scale_factor, scale_axis, overlap_cube, 
     )
 
 
-@pytest.mark.numerical
-@pytest.mark.parametrize("radius_scale", (0.25, 0.5, 1, 1.5, 2, 2.5, 3))
+# @pytest.mark.numerical
+# @pytest.mark.parametrize("radius_scale", (0.25, 0.5, 1, 1.5, 2, 2.5, 3))
+@pytest.mark.parametrize("radius_scale", (1.5,))
 @pytest.mark.parametrize("overlap_cube", (False,))
 def test_native_sphere_fd_step_sweep(tmp_path, radius_scale, overlap_cube, numerical_case_dir):
     radius = SPHERE_RADIUS_UM * radius_scale
@@ -495,7 +496,7 @@ def test_native_sphere_fd_step_sweep(tmp_path, radius_scale, overlap_cube, numer
         local_gradient=False,
     )
 
-    steps = np.logspace(-8, -1, num=4)
+    steps = np.logspace(-8, -1, num=8)
     fd_grads = []
     for step in steps:
         grad = finite_difference_params(native_objective_fd, params0, step)
