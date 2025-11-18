@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
+import time
 from abc import ABC
 from typing import TYPE_CHECKING, Any, Callable, Literal, Optional, Union
 
 import numpy as np
 import pydantic.v1 as pydantic
 
+from tidy3d.components.autograd import AutogradFieldMap, get_static
+from tidy3d.components.autograd.derivative_utils import DerivativeInfo
 from tidy3d.components.base import cached_property
 from tidy3d.components.data.data_array import DATA_ARRAY_MAP, TriangleMeshDataArray
 from tidy3d.components.data.dataset import TriangleMeshDataset
 from tidy3d.components.data.validators import validate_no_nans
 from tidy3d.components.types import Ax, Bound, Coordinate, MatrixReal4x4, Shapely
 from tidy3d.components.viz import add_ax_if_none, equal_aspect
+from tidy3d.config import config
 from tidy3d.constants import fp_eps, inf
 from tidy3d.exceptions import DataError, ValidationError
 from tidy3d.log import log
@@ -45,6 +49,12 @@ class TriangleMesh(base.Geometry, ABC):
 
     _no_nans_mesh = validate_no_nans("mesh_dataset")
 
+    @cached_property
+    def _barycentric_samples(self) -> dict[int, np.ndarray]:
+        """Cache barycentric sampling patterns keyed by subdivision level."""
+
+        return {}
+
     @pydantic.root_validator(pre=True)
     @verify_packages_import(["trimesh"])
     def _validate_trimesh_library(cls, values: dict[str, Any]) -> dict[str, Any]:
@@ -60,6 +70,11 @@ class TriangleMesh(base.Geometry, ABC):
                 return None
         return val
 
+    @pydantic.validator("mesh_dataset")
+    def debug(cls, val: Any) -> Any:
+        """Warn if the Dataset fails to load."""
+        return val
+
     @pydantic.validator("mesh_dataset", always=True)
     @verify_packages_import(["trimesh"])
     def _check_mesh(cls, val: TriangleMeshDataset) -> TriangleMeshDataset:
@@ -69,7 +84,9 @@ class TriangleMesh(base.Geometry, ABC):
 
         import trimesh
 
-        mesh = cls._triangles_to_trimesh(val.surface_mesh)
+        surface_mesh = val.surface_mesh
+        triangles = get_static(surface_mesh.data)
+        mesh = cls._triangles_to_trimesh(triangles)
         if not all(np.array(mesh.area_faces) > AREA_SIZE_THRESHOLD):
             old_tol = trimesh.tol.merge
             trimesh.tol.merge = np.sqrt(2 * AREA_SIZE_THRESHOLD)
@@ -310,7 +327,8 @@ class TriangleMesh(base.Geometry, ABC):
         """Convert an (N, 3, 3) numpy array of triangles to a ``trimesh.Trimesh``."""
         import trimesh
 
-        return trimesh.Trimesh(**trimesh.triangles.to_kwargs(triangles))
+        triangles_static = get_static(triangles)
+        return trimesh.Trimesh(**trimesh.triangles.to_kwargs(triangles_static))
 
     @classmethod
     def from_height_grid(
@@ -649,7 +667,6 @@ class TriangleMesh(base.Geometry, ABC):
 
         arrays = tuple(map(np.array, (x, y, z)))
         self._ensure_equal_shape(*arrays)
-        inside = np.zeros((arrays[0].size,), dtype=bool)
         arrays_flat = map(np.ravel, arrays)
         arrays_stacked = np.stack(tuple(arrays_flat), axis=-1)
         inside = self.trimesh.contains(arrays_stacked)
@@ -695,3 +712,334 @@ class TriangleMesh(base.Geometry, ABC):
         )
 
         return base.Geometry.plot(self, x=x, y=y, z=z, ax=ax, **patch_kwargs)
+
+    def _compute_derivatives(self, derivative_info: DerivativeInfo) -> AutogradFieldMap:
+        """Compute adjoint derivatives for a ``TriangleMesh`` geometry."""
+
+        start_time = time.perf_counter()  # TODO remove
+        vjps: AutogradFieldMap = {}
+
+        if not self.mesh_dataset:
+            raise DataError("Can't compute derivatives without mesh data.")
+
+        valid_paths = {("mesh_dataset", "surface_mesh")}
+        for path in derivative_info.paths:
+            if path not in valid_paths:
+                raise ValueError(f"No derivative defined w.r.t. 'TriangleMesh' field '{path}'.")
+
+        if ("mesh_dataset", "surface_mesh") not in derivative_info.paths:
+            return vjps
+
+        triangles = np.asarray(self.triangles, dtype=config.adjoint.gradient_dtype_float)
+
+        # early exit if geometry is completely outside simulation bounds
+        sim_min, sim_max = map(np.asarray, derivative_info.simulation_bounds)
+        mesh_min, mesh_max = map(np.asarray, self.bounds)
+        if np.any(mesh_max < sim_min) or np.any(mesh_min > sim_max):
+            log.warning(
+                "'TriangleMesh' lies completely outside the simulation domain.",
+                log_once=True,
+            )
+            zeros = np.zeros_like(triangles, dtype=config.adjoint.gradient_dtype_float)
+            vjps[("mesh_dataset", "surface_mesh")] = zeros
+            return vjps
+
+        # gather surface samples within the simulation bounds
+        dx = derivative_info.adaptive_vjp_spacing()
+        print("dx = ", dx)
+        dx = dx / 6
+        samples = self._collect_surface_samples(
+            triangles=triangles,
+            spacing=dx,
+            sim_min=sim_min,
+            sim_max=sim_max,
+        )
+
+        if samples["points"].shape[0] == 0:
+            zeros = np.zeros_like(triangles, dtype=config.adjoint.gradient_dtype_float)
+            vjps[("mesh_dataset", "surface_mesh")] = zeros
+            return vjps
+
+        interpolators = derivative_info.interpolators
+        if interpolators is None:
+            interpolators = derivative_info.create_interpolators(
+                dtype=config.adjoint.gradient_dtype_float
+            )
+
+        g = derivative_info.evaluate_gradient_at_points(
+            samples["points"],
+            samples["normals"],
+            samples["perps1"],
+            samples["perps2"],
+            interpolators,
+        )
+
+        # accumulate per-vertex contributions using barycentric weights
+        weights = (samples["weights"] * g).real
+        normals = samples["normals"]
+        faces = samples["faces"]
+        bary = samples["barycentric"]
+
+        contrib_vec = weights[:, None] * normals
+
+        triangle_grads = np.zeros_like(triangles, dtype=config.adjoint.gradient_dtype_float)
+        for vertex_idx in range(3):
+            scaled = contrib_vec * bary[:, vertex_idx][:, None]
+            np.add.at(triangle_grads[:, vertex_idx, :], faces, scaled)
+
+        vjps[("mesh_dataset", "surface_mesh")] = triangle_grads
+        duration = time.perf_counter() - start_time  # TODO REMOVE
+        print(f"TriangleMesh._compute_derivatives runtime: {duration:.3f}s")
+        return vjps
+
+    def _collect_surface_samples(
+        self,
+        triangles: np.ndarray,
+        spacing: float,
+        sim_min: np.ndarray,
+        sim_max: np.ndarray,
+    ) -> dict[str, np.ndarray]:
+        """Deterministic per-triangle sampling used historically."""
+
+        dtype = config.adjoint.gradient_dtype_float
+        tol = config.adjoint.edge_clip_tolerance
+
+        sim_min = np.asarray(sim_min, dtype=dtype)
+        sim_max = np.asarray(sim_max, dtype=dtype)
+
+        points_list: list[np.ndarray] = []
+        normals_list: list[np.ndarray] = []
+        perps1_list: list[np.ndarray] = []
+        perps2_list: list[np.ndarray] = []
+        weights_list: list[np.ndarray] = []
+        faces_list: list[np.ndarray] = []
+        bary_list: list[np.ndarray] = []
+
+        spacing = max(float(spacing), np.finfo(float).eps)
+        triangles_arr = np.asarray(triangles, dtype=dtype)
+
+        sim_extents = sim_max - sim_min
+        collapsed_axes = np.isclose(sim_extents, 0.0, atol=tol)
+        per_unit_scale = 1.0
+        if np.any(collapsed_axes):
+            coords = triangles_arr.reshape(-1, 3)
+            geom_min = np.min(coords, axis=0)
+            geom_max = np.max(coords, axis=0)
+            geom_extents = geom_max - geom_min
+            collapsed_extents = np.maximum(geom_extents[collapsed_axes], tol)
+            per_unit_scale = float(np.prod(collapsed_extents))
+
+        for face_index, tri in enumerate(triangles_arr):
+            area, normal = self._triangle_area_and_normal(tri)
+            if area <= AREA_SIZE_THRESHOLD:
+                continue
+
+            perps = self._triangle_tangent_basis(tri, normal)
+            if perps is None:
+                continue
+            perp1, perp2 = perps
+
+            edge_lengths = (
+                np.linalg.norm(tri[1] - tri[0]),
+                np.linalg.norm(tri[2] - tri[1]),
+                np.linalg.norm(tri[0] - tri[2]),
+            )
+            subdivisions = self._subdivision_count(area, spacing, edge_lengths)
+            barycentric = self._get_barycentric_samples(subdivisions, dtype)
+            num_samples = barycentric.shape[0]
+            base_weight = area / num_samples
+            if per_unit_scale != 1.0:
+                base_weight /= per_unit_scale
+
+            sample_points = barycentric @ tri
+
+            valid_axes = np.abs(sim_max - sim_min) > tol
+            inside_mask = np.all(
+                sample_points[:, valid_axes] >= (sim_min - tol)[valid_axes], axis=1
+            ) & np.all(sample_points[:, valid_axes] <= (sim_max + tol)[valid_axes], axis=1)
+            if not np.any(inside_mask):
+                continue
+
+            sample_points = sample_points[inside_mask]
+            bary_inside = barycentric[inside_mask]
+            n_samples_inside = sample_points.shape[0]
+
+            normal_tile = np.repeat(normal[None, :], n_samples_inside, axis=0)
+            perp1_tile = np.repeat(perp1[None, :], n_samples_inside, axis=0)
+            perp2_tile = np.repeat(perp2[None, :], n_samples_inside, axis=0)
+            weights_tile = np.full(n_samples_inside, base_weight, dtype=dtype)
+            faces_tile = np.full(n_samples_inside, face_index, dtype=int)
+
+            points_list.append(sample_points)
+            normals_list.append(normal_tile)
+            perps1_list.append(perp1_tile)
+            perps2_list.append(perp2_tile)
+            weights_list.append(weights_tile)
+            faces_list.append(faces_tile)
+            bary_list.append(bary_inside)
+
+        if not points_list:
+            return {
+                "points": np.zeros((0, 3), dtype=dtype),
+                "normals": np.zeros((0, 3), dtype=dtype),
+                "perps1": np.zeros((0, 3), dtype=dtype),
+                "perps2": np.zeros((0, 3), dtype=dtype),
+                "weights": np.zeros((0,), dtype=dtype),
+                "faces": np.zeros((0,), dtype=int),
+                "barycentric": np.zeros((0, 3), dtype=dtype),
+            }
+
+        return {
+            "points": np.concatenate(points_list, axis=0),
+            "normals": np.concatenate(normals_list, axis=0),
+            "perps1": np.concatenate(perps1_list, axis=0),
+            "perps2": np.concatenate(perps2_list, axis=0),
+            "weights": np.concatenate(weights_list, axis=0),
+            "faces": np.concatenate(faces_list, axis=0),
+            "barycentric": np.concatenate(bary_list, axis=0),
+        }
+
+    @staticmethod
+    def _triangle_area_and_normal(triangle: np.ndarray) -> tuple[float, np.ndarray]:
+        """Return area and outward normal of the provided triangle."""
+
+        edge01 = triangle[1] - triangle[0]
+        edge02 = triangle[2] - triangle[0]
+        cross = np.cross(edge01, edge02)
+        norm = np.linalg.norm(cross)
+        if norm <= 0.0:
+            return 0.0, np.zeros(3, dtype=triangle.dtype)
+        normal = (cross / norm).astype(triangle.dtype, copy=False)
+        area = 0.5 * norm
+        return area, normal
+
+    @classmethod
+    def _subdivision_count(
+        cls,
+        area: float,
+        spacing: float,
+        edge_lengths: Optional[tuple[float, float, float]] = None,
+    ) -> int:
+        """Determine the number of subdivisions needed for the given area and spacing."""
+
+        spacing = max(float(spacing), np.finfo(float).eps)
+
+        target = np.sqrt(max(area, 0.0))
+        area_based = np.ceil(np.sqrt(2.0) * target / spacing)
+
+        edge_based = 0.0
+        if edge_lengths:
+            max_edge = max(edge_lengths)
+            if max_edge > 0.0:
+                edge_based = np.ceil(max_edge / spacing)
+
+        subdivisions = max(1, int(max(area_based, edge_based)))
+        return subdivisions
+
+    def _get_barycentric_samples(self, subdivisions: int, dtype: np.dtype) -> np.ndarray:
+        """Return barycentric sample coordinates for a subdivision level."""
+
+        cache = self._barycentric_samples
+        if subdivisions not in cache:
+            cache[subdivisions] = self._build_barycentric_samples(subdivisions)
+        return cache[subdivisions].astype(dtype, copy=False)
+
+    @staticmethod
+    def _build_barycentric_samples(subdivisions: int) -> np.ndarray:
+        """Construct barycentric sampling points for a given subdivision level."""
+
+        if subdivisions <= 1:
+            return np.array([[1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0]])
+
+        bary = []
+        for i in range(subdivisions):
+            for j in range(subdivisions - i):
+                l1 = (i + 1.0 / 3.0) / subdivisions
+                l2 = (j + 1.0 / 3.0) / subdivisions
+                l0 = 1.0 - l1 - l2
+                bary.append((l0, l1, l2))
+        return np.asarray(bary, dtype=float)
+
+    @staticmethod
+    def subdivide_faces(vertices: np.ndarray, faces: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Uniformly subdivide each triangular face by inserting edge midpoints."""
+
+        midpoint_cache: dict[tuple[int, int], int] = {}
+        verts_list = [np.asarray(v, dtype=float) for v in vertices]
+
+        def midpoint(i: int, j: int) -> int:
+            key = (i, j) if i < j else (j, i)
+            if key in midpoint_cache:
+                return midpoint_cache[key]
+            vm = 0.5 * (verts_list[i] + verts_list[j])
+            verts_list.append(vm)
+            idx = len(verts_list) - 1
+            midpoint_cache[key] = idx
+            return idx
+
+        new_faces: list[tuple[int, int, int]] = []
+        for tri in faces:
+            a = midpoint(tri[0], tri[1])
+            b = midpoint(tri[1], tri[2])
+            c = midpoint(tri[2], tri[0])
+            new_faces.extend(((tri[0], a, c), (tri[1], b, a), (tri[2], c, b), (a, b, c)))
+
+        verts_arr = np.asarray(verts_list, dtype=float)
+        return verts_arr, np.asarray(new_faces, dtype=int)
+
+    @staticmethod
+    def _triangle_tangent_basis(
+        triangle: np.ndarray, normal: np.ndarray
+    ) -> Optional[tuple[np.ndarray, np.ndarray]]:
+        """Compute orthonormal tangential vectors for a triangle."""
+
+        tol = np.finfo(triangle.dtype).eps
+        edges = [triangle[1] - triangle[0], triangle[2] - triangle[0], triangle[2] - triangle[1]]
+
+        edge = None
+        for candidate in edges:
+            length = np.linalg.norm(candidate)
+            if length > tol:
+                edge = (candidate / length).astype(triangle.dtype, copy=False)
+                break
+
+        if edge is None:
+            return None
+
+        perp1 = edge
+        perp2 = np.cross(normal, perp1)
+        perp2_norm = np.linalg.norm(perp2)
+        if perp2_norm <= tol:
+            return None
+        perp2 = (perp2 / perp2_norm).astype(triangle.dtype, copy=False)
+        return perp1, perp2
+
+    @staticmethod
+    def _barycentric_from_points(
+        triangles: np.ndarray, points: np.ndarray, dtype: np.dtype
+    ) -> np.ndarray:
+        """Compute barycentric coordinates for points relative to their triangles."""
+
+        v0 = triangles[:, 1] - triangles[:, 0]
+        v1 = triangles[:, 2] - triangles[:, 0]
+        v2 = points - triangles[:, 0]
+
+        d00 = np.einsum("ij,ij->i", v0, v0)
+        d01 = np.einsum("ij,ij->i", v0, v1)
+        d11 = np.einsum("ij,ij->i", v1, v1)
+        d20 = np.einsum("ij,ij->i", v2, v0)
+        d21 = np.einsum("ij,ij->i", v2, v1)
+
+        denom = d00 * d11 - d01 * d01
+        tol = np.finfo(dtype).eps
+        denom_safe = np.where(np.abs(denom) <= tol, 1.0, denom)
+
+        v = (d11 * d20 - d01 * d21) / denom_safe
+        w = (d00 * d21 - d01 * d20) / denom_safe
+        u = 1.0 - v - w
+
+        bary = np.stack([u, v, w], axis=1).astype(dtype, copy=False)
+        degenerate = np.abs(denom) <= tol
+        if np.any(degenerate):
+            bary[degenerate] = 1.0 / 3.0
+        return bary

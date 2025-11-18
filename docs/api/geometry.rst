@@ -295,5 +295,6 @@ Use the ``from_stl()`` class method to import from an external STL file, or ``fr
    + `Importing STL files <../notebooks/STLImport.html>`_
    + `Defining complex geometries using trimesh <../notebooks/CreatingGeometryUsingTrimesh.html>`_
 
-~~~~
+Shape gradients for ``TriangleMesh`` geometries are supported through the autograd workflow. When a mesh participates in an adjoint optimization, boundary sensitivities are evaluated on the triangle faces. The cost of the surface integral scales with the number of mesh faces; very fine meshes may require additional sampling to converge gradients, so consider simplifying or coarsening meshes when possible, or adjusting the autograd configuration to trade off accuracy and runtime.
 
+~~~~

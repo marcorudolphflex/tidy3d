@@ -9,20 +9,22 @@ import autograd.numpy as anp
 import numpy as np
 import pydantic.v1 as pydantic
 import shapely
+from pydantic.v1 import PrivateAttr
 from shapely.geometry.base import BaseGeometry
 
-from tidy3d.components.autograd import AutogradFieldMap, TracedSize1D
+from tidy3d.components.autograd import AutogradFieldMap, TracedSize1D, get_static
 from tidy3d.components.autograd.derivative_utils import DerivativeInfo
+from tidy3d.components.autograd.types import TracedPositiveFloat
 from tidy3d.components.base import cached_property, skip_if_fields_missing
+from tidy3d.components.geometry import base
+from tidy3d.components.geometry.mesh import TriangleMesh
+from tidy3d.components.geometry.polyslab import PolySlab
 from tidy3d.components.types import Axis, Bound, Coordinate, MatrixReal4x4, Shapely
 from tidy3d.config import config
 from tidy3d.constants import LARGE_NUMBER, MICROMETER
 from tidy3d.exceptions import SetupError, ValidationError
 from tidy3d.log import log
 from tidy3d.packaging import verify_packages_import
-
-from . import base
-from .polyslab import PolySlab
 
 # for sampling conical frustum in visualization
 _N_SAMPLE_CURVE_SHAPELY = 40
@@ -32,6 +34,61 @@ _N_SHAPELY_QUAD_SEGS = 200
 
 # Default number of points to discretize polyslab in `Cylinder.to_polyslab()`
 _N_PTS_CYLINDER_POLYSLAB = 51
+_MAX_ICOSPHERE_SUBDIVISIONS = 7  # this would have 164K vertices and 328K faces
+_DEFAULT_EDGE_FRACTION = 0.25
+
+
+def _base_icosahedron() -> tuple[np.ndarray, np.ndarray]:
+    """Return vertices and faces of a unit icosahedron."""
+
+    phi = (1.0 + np.sqrt(5.0)) / 2.0
+    vertices = np.array(
+        [
+            (-1, phi, 0),
+            (1, phi, 0),
+            (-1, -phi, 0),
+            (1, -phi, 0),
+            (0, -1, phi),
+            (0, 1, phi),
+            (0, -1, -phi),
+            (0, 1, -phi),
+            (phi, 0, -1),
+            (phi, 0, 1),
+            (-phi, 0, -1),
+            (-phi, 0, 1),
+        ],
+        dtype=float,
+    )
+    vertices /= np.linalg.norm(vertices, axis=1)[:, None]
+    faces = np.array(
+        [
+            (0, 11, 5),
+            (0, 5, 1),
+            (0, 1, 7),
+            (0, 7, 10),
+            (0, 10, 11),
+            (1, 5, 9),
+            (5, 11, 4),
+            (11, 10, 2),
+            (10, 7, 6),
+            (7, 1, 8),
+            (3, 9, 4),
+            (3, 4, 2),
+            (3, 2, 6),
+            (3, 6, 8),
+            (3, 8, 9),
+            (4, 9, 5),
+            (2, 4, 11),
+            (6, 2, 10),
+            (8, 6, 7),
+            (9, 8, 1),
+        ],
+        dtype=int,
+    )
+    return vertices, faces
+
+
+_ICOSAHEDRON_VERTS, _ICOSAHEDRON_FACES = _base_icosahedron()
 
 
 class Sphere(base.Centered, base.Circular):
@@ -41,6 +98,44 @@ class Sphere(base.Centered, base.Circular):
     -------
     >>> b = Sphere(center=(1,2,3), radius=2)
     """
+
+    radius: TracedPositiveFloat = pydantic.Field(
+        ...,
+        title="Radius",
+        description="Radius of geometry.",
+        units=MICROMETER,
+    )
+
+    _icosphere_cache: dict[int, tuple[np.ndarray, float]] = PrivateAttr(default_factory=dict)
+
+    @classmethod
+    def unit_sphere_triangles(
+        cls,
+        *,
+        target_edge_length: Optional[float] = None,
+        subdivisions: Optional[int] = None,
+    ) -> np.ndarray:
+        """Return unit sphere triangles discretized via an icosphere."""
+
+        unit_tris = UNIT_SPHERE._unit_sphere_triangles(
+            target_edge_length=target_edge_length,
+            subdivisions=subdivisions,
+            copy_result=True,
+        )
+        return unit_tris
+
+    def to_triangle_mesh(
+        self,
+        *,
+        max_edge_length: Optional[float] = None,
+        subdivisions: Optional[int] = None,
+    ) -> TriangleMesh:
+        """Approximate the sphere surface with a ``TriangleMesh``."""
+
+        triangles, _ = self._triangulated_surface(
+            max_edge_length=max_edge_length, subdivisions=subdivisions
+        )
+        return TriangleMesh.from_triangles(triangles)
 
     def inside(
         self, x: np.ndarray[float], y: np.ndarray[float], z: np.ndarray[float]
@@ -141,6 +236,25 @@ class Sphere(base.Centered, base.Circular):
             return []
         return [shapely.Point(x0, y0).buffer(0.5 * intersect_dist, quad_segs=_N_SHAPELY_QUAD_SEGS)]
 
+    def _discretization_wavelength(self, derivative_info: DerivativeInfo) -> float:
+        """Choose reference wavelength for converting to triangle mesh."""
+
+        wvl0_min = derivative_info.wavelength_min
+        wvl_mat = wvl0_min / np.max([1.0, np.max(np.sqrt(abs(derivative_info.eps_in)))])
+
+        grid_cfg = config.adjoint
+
+        min_wvl_mat = grid_cfg.min_wvl_fraction * wvl0_min
+        if wvl_mat < min_wvl_mat:
+            log.warning(
+                f"The minimum wavelength inside the sphere material is {wvl_mat:.3e} μm, which would "
+                f"create a large number of discretization points for computing the gradient. "
+                f"To prevent performance degradation, the discretization wavelength has "
+                f"been clipped to {min_wvl_mat:.3e} μm.",
+                log_once=True,
+            )
+        return max(wvl_mat, min_wvl_mat)
+
     @cached_property
     def bounds(self) -> Bound:
         """Returns bounding box min and max coordinates.
@@ -177,6 +291,245 @@ class Sphere(base.Centered, base.Circular):
                 area *= 0.5
 
         return area
+
+    def _rescale_mesh_vjps(self, vjps: AutogradFieldMap) -> AutogradFieldMap:
+        """Divide every VJP value by the sphere radius (autograd-safe)."""
+        for path, value in vjps.items():
+            vjps[path] = value.divide(self.radius)
+        return vjps
+
+    def _compute_derivatives(self, derivative_info: DerivativeInfo) -> AutogradFieldMap:
+        """Compute adjoint derivatives using smooth sphere surface samples."""
+        valid_paths = {("radius",), *{("center", i) for i in range(3)}}
+        for path in derivative_info.paths:
+            if path not in valid_paths:
+                raise ValueError(
+                    f"No derivative defined w.r.t. 'Sphere' field '{path}'. "
+                    "Supported fields are 'radius' and 'center'."
+                )
+
+        if not derivative_info.paths:
+            return {}
+
+        grid_cfg = config.adjoint
+        wvl_mat = self._discretization_wavelength(derivative_info)
+        target_edge = max(wvl_mat / grid_cfg.points_per_wavelength, np.finfo(float).eps)
+        triangles, _ = self._triangulated_surface(max_edge_length=target_edge)
+        triangles = triangles.astype(grid_cfg.gradient_dtype_float, copy=False)
+
+        sim_min, sim_max = (
+            np.asarray(arr, dtype=grid_cfg.gradient_dtype_float)
+            for arr in derivative_info.simulation_bounds
+        )
+        tol = config.adjoint.edge_clip_tolerance
+
+        sim_extents = sim_max - sim_min
+        collapsed_axes = np.isclose(sim_extents, 0.0, atol=tol)
+        per_unit_scale = 1.0
+        if np.any(collapsed_axes):
+            coords = triangles.reshape(-1, 3)
+            geom_min = np.min(coords, axis=0)
+            geom_max = np.max(coords, axis=0)
+            geom_extents = geom_max - geom_min
+            collapsed_extents = np.maximum(geom_extents[collapsed_axes], tol)
+            per_unit_scale = float(np.prod(collapsed_extents))
+
+        trimesh_obj = TriangleMesh._triangles_to_trimesh(triangles)
+        vertices = np.asarray(trimesh_obj.vertices, dtype=grid_cfg.gradient_dtype_float)
+        # normals = np.asarray(trimesh_obj.vertex_normals, dtype=grid_cfg.gradient_dtype_float)
+        center = np.asarray(self.center, dtype=grid_cfg.gradient_dtype_float)
+        verts_centered = vertices - center
+        norms = np.linalg.norm(verts_centered, axis=1, keepdims=True)
+        normals = verts_centered / norms
+
+        if vertices.size == 0:
+            return dict.fromkeys(derivative_info.paths, 0.0)
+
+        # get vertex weights
+        faces = np.asarray(trimesh_obj.faces, dtype=int)
+        face_areas = np.asarray(trimesh_obj.area_faces, dtype=grid_cfg.gradient_dtype_float)
+        weights = np.zeros(len(vertices), dtype=grid_cfg.gradient_dtype_float)
+        np.add.at(weights, faces[:, 0], face_areas / 3.0)
+        np.add.at(weights, faces[:, 1], face_areas / 3.0)
+        np.add.at(weights, faces[:, 2], face_areas / 3.0)
+
+        perp1, perp2 = self._tangent_basis_from_normals(normals)
+
+        valid_axes = np.abs(sim_max - sim_min) > tol
+        inside_mask = np.all(
+            vertices[:, valid_axes] >= (sim_min - tol)[valid_axes], axis=1
+        ) & np.all(vertices[:, valid_axes] <= (sim_max + tol)[valid_axes], axis=1)
+
+        if not np.any(inside_mask):
+            return dict.fromkeys(derivative_info.paths, 0.0)
+
+        points = vertices[inside_mask]
+        normals_sel = normals[inside_mask]
+        perp1_sel = perp1[inside_mask]
+        perp2_sel = perp2[inside_mask]
+        weights_sel = weights[inside_mask]
+
+        if per_unit_scale != 1.0:
+            weights_sel = weights_sel / per_unit_scale
+
+        interpolators = derivative_info.interpolators
+        if interpolators is None:
+            interpolators = derivative_info.create_interpolators(
+                dtype=grid_cfg.gradient_dtype_float
+            )
+
+        g = derivative_info.evaluate_gradient_at_points(
+            points,
+            normals_sel,
+            perp1_sel,
+            perp2_sel,
+            interpolators,
+        )
+
+        weighted = (weights_sel * g).real
+        grad_center = np.sum(weighted[:, None] * normals_sel, axis=0)
+        grad_radius = np.sum(weighted)
+
+        vjps: AutogradFieldMap = {}
+        for path in derivative_info.paths:
+            if path == ("radius",):
+                vjps[path] = float(grad_radius)
+            else:
+                _, idx = path
+                vjps[path] = float(grad_center[idx])
+
+        return vjps
+
+    def _triangulated_surface(
+        self,
+        *,
+        max_edge_length: Optional[float] = None,
+        subdivisions: Optional[int] = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return physical and unit triangles for the surface discretization."""
+
+        unit_tris = self._unit_sphere_triangles(
+            target_edge_length=self._edge_length_on_unit_sphere(max_edge_length),
+            subdivisions=subdivisions,
+            copy_result=False,
+        )
+
+        radius = float(get_static(self.radius))
+        center = np.asarray(self.center, dtype=float)
+        dtype = config.adjoint.gradient_dtype_float
+
+        physical = radius * unit_tris + center
+        return physical.astype(dtype, copy=False), unit_tris.astype(dtype, copy=False)
+
+    def _edge_length_on_unit_sphere(self, max_edge_length: Optional[float]) -> Optional[float]:
+        """Convert ``max_edge_length`` in μm to unit-sphere coordinates."""
+
+        if max_edge_length is None:
+            return _DEFAULT_EDGE_FRACTION
+        radius = float(self.radius)
+        if radius <= 0.0:
+            return None
+        return max_edge_length / radius
+
+    def _unit_sphere_triangles(
+        self,
+        *,
+        target_edge_length: Optional[float] = None,
+        subdivisions: Optional[int] = None,
+        copy_result: bool,
+    ) -> np.ndarray:
+        """Return cached unit-sphere triangles with optional copying."""
+        if target_edge_length is not None and subdivisions is not None:
+            raise ValueError("Specify either target_edge_length OR subdivisions, not both.")
+
+        if subdivisions is None:
+            subdivisions = self._subdivisions_for_edge(target_edge_length)
+
+        triangles, _ = self._icosphere_data(subdivisions)
+        return np.array(triangles, copy=copy_result)
+
+    def _subdivisions_for_edge(self, target_edge_length: Optional[float]) -> int:
+        if target_edge_length is None or target_edge_length <= 0.0:
+            return 0
+
+        for subdiv in range(_MAX_ICOSPHERE_SUBDIVISIONS + 1):
+            _, max_edge = self._icosphere_data(subdiv)
+            if max_edge <= target_edge_length:
+                return subdiv
+
+        log.warning(
+            "Requested sphere mesh edge length %.3e μm requires more than %d subdivisions. "
+            "Clipping to the finest available mesh.",
+            target_edge_length,
+            _MAX_ICOSPHERE_SUBDIVISIONS,
+            log_once=True,
+        )
+        return _MAX_ICOSPHERE_SUBDIVISIONS
+
+    @staticmethod
+    def _tangent_basis_from_normals(normals: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Construct orthonormal tangential bases for each normal vector."""
+
+        dtype = normals.dtype
+        basis1 = np.zeros_like(normals)
+        basis2 = np.zeros_like(normals)
+        ref_vectors = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], dtype=dtype)
+        tol = np.finfo(dtype).eps
+
+        for idx, normal in enumerate(normals):
+            ref = ref_vectors[0]
+            if abs(np.dot(normal, ref)) > 0.8:
+                ref = ref_vectors[1]
+            perp1 = np.cross(normal, ref)
+            norm_perp1 = np.linalg.norm(perp1)
+            if norm_perp1 <= tol:
+                ref = ref_vectors[2]
+                perp1 = np.cross(normal, ref)
+                norm_perp1 = np.linalg.norm(perp1)
+            if norm_perp1 <= tol:
+                basis1[idx] = ref_vectors[0]
+                basis2[idx] = ref_vectors[1]
+                continue
+            perp1 = (perp1 / norm_perp1).astype(dtype, copy=False)
+            perp2 = np.cross(normal, perp1)
+            norm_perp2 = np.linalg.norm(perp2)
+            if norm_perp2 > tol:
+                perp2 = (perp2 / norm_perp2).astype(dtype, copy=False)
+            else:
+                perp2 = ref_vectors[2]
+            basis1[idx] = perp1
+            basis2[idx] = perp2
+
+        return basis1, basis2
+
+    def _icosphere_data(self, subdivisions: int) -> tuple[np.ndarray, float]:
+        cache = self._icosphere_cache
+        if subdivisions in cache:
+            return cache[subdivisions]
+
+        vertices = np.asarray(_ICOSAHEDRON_VERTS, dtype=float)
+        faces = np.asarray(_ICOSAHEDRON_FACES, dtype=int)
+        if subdivisions > 0:
+            vertices = vertices.copy()
+            faces = faces.copy()
+            for _ in range(subdivisions):
+                vertices, faces = TriangleMesh.subdivide_faces(vertices, faces)
+
+        norms = np.linalg.norm(vertices, axis=1, keepdims=True)
+        norms = np.where(norms == 0.0, 1.0, norms)
+        vertices = vertices / norms
+
+        triangles = vertices[faces]
+        max_edge = self._edge_length(triangles)
+        cache[subdivisions] = (triangles, max_edge)
+        return triangles, max_edge
+
+    @staticmethod
+    def _edge_length(triangles: np.ndarray) -> float:
+        return float(np.linalg.norm(triangles[0, 0] - triangles[0, 1]))
+
+
+UNIT_SPHERE = Sphere(center=(0.0, 0.0, 0.0), radius=1.0)
 
 
 class Cylinder(base.Centered, base.Circular, base.Planar):

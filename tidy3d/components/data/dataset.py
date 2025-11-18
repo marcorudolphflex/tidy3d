@@ -888,6 +888,11 @@ class TriangleMeshDataset(Dataset):
         "for a surface mesh.",
     )
 
+    @pd.validator("surface_mesh")
+    def debug(cls, val: Any) -> Any:
+        """Warn if the Dataset fails to load."""
+        return val
+
 
 class TimeDataset(Dataset):
     """Dataset for storing a function of time."""

@@ -527,6 +527,31 @@ def make_structures(params: anp.ndarray) -> dict[str, td.Structure]:
     )
     cylinder = td.Structure(geometry=cylinder_geo, medium=polyslab.medium)
 
+    # triangle mesh geometry with param-dependent medium response
+    base_vertices = np.array(
+        [
+            (0.0, 0.0, 0.0),
+            (0.6, 0.0, 0.0),
+            (0.0, 0.6, 0.0),
+            (0.0, 0.0, 0.6),
+        ],
+    )
+    faces = np.array(
+        [
+            (0, 2, 1),
+            (0, 1, 3),
+            (0, 3, 2),
+            (1, 2, 3),
+        ],
+        dtype=int,
+    )
+    triangle_mesh_geo = td.TriangleMesh.from_vertices_faces(base_vertices, faces)
+    mesh_eps = 1.8 + 0.2 * anp.abs(vector @ params)
+    triangle_mesh = td.Structure(
+        geometry=triangle_mesh_geo,
+        medium=td.Medium(permittivity=mesh_eps),
+    )
+
     return {
         "medium": medium,
         "center_list": center_list,
@@ -541,6 +566,7 @@ def make_structures(params: anp.ndarray) -> dict[str, td.Structure]:
         "pole_res": pole_res,
         "custom_pole_res": custom_pole_res,
         "cylinder": cylinder,
+        "triangle_mesh": triangle_mesh,
     }
 
 
@@ -638,6 +664,7 @@ structure_keys_ = (
     "pole_res",
     "custom_pole_res",
     "cylinder",
+    "triangle_mesh",
 )
 monitor_keys_ = ("mode", "diff", "field_vol", "field_point")
 
@@ -1105,6 +1132,34 @@ def test_autograd_polyslab_cylinder(use_emulated_run, monitor_key):
     val_cylinder, grad_cylinder = ag.value_and_grad(objective_cylinder)(p0)
     print(val_cylinder, grad_cylinder)
     assert anp.all(grad_cylinder != 0.0), "some gradients are 0"
+
+
+@pytest.mark.parametrize("monitor_key", ("mode",))
+def test_autograd_sphere_triangle_mesh(use_emulated_run, monitor_key):
+    """Integration test that Sphere gradients are non-zero (mirrors cylinder check)."""
+
+    monitor, postprocess = make_monitors()[monitor_key]
+
+    def make_sphere(radius, x0, y0, z0):
+        return td.Sphere(center=(x0, y0, z0), radius=radius)
+
+    def make_sim(params):
+        geometry = make_sphere(*params)
+        structure = td.Structure(geometry=geometry, medium=td.Medium(permittivity=2))
+        return SIM_BASE.updated_copy(structures=[structure], monitors=[monitor])
+
+    p0 = [0.6, 0.0, 0.0, 0.0]
+
+    def objective(params):
+        sim = make_sim(params)
+        if PLOT_SIM:
+            plot_sim(sim, plot_eps=True)
+        data = run(sim, task_name="autograd_test", verbose=False)
+        return anp.sum(anp.abs(data[monitor.name].amps)).item()
+
+    val_sphere, grad_sphere = ag.value_and_grad(objective)(p0)
+    print(val_sphere, grad_sphere)
+    assert anp.all(grad_sphere != 0.0), "sphere gradients are zero"
 
 
 @pytest.mark.parametrize("structure_key, monitor_key", args)

@@ -78,17 +78,27 @@ class DataArray(xr.DataArray):
     _data_attrs: dict[str, str] = {}
 
     def __init__(self, data, *args: Any, **kwargs: Any) -> None:
+        # convert numpy object arrays that contain autograd boxes; keep other types as-is
+        data = self._maybe_convert_object_boxes(data)
+
         # if data is a vanilla autograd box, convert to our box
         if isbox(data) and not is_tidy_box(data):
             data = TidyArrayBox.from_arraybox(data)
         # do the same for xr.Variable or xr.DataArray type
-        elif (
-            isinstance(data, (xr.Variable, xr.DataArray))
-            and isbox(data.data)
-            and not is_tidy_box(data.data)
-        ):
-            data.data = TidyArrayBox.from_arraybox(data.data)
+        elif isinstance(data, (xr.Variable, xr.DataArray)):
+            if isbox(data.data) and not is_tidy_box(data.data):
+                data.data = TidyArrayBox.from_arraybox(data.data)
         super().__init__(data, *args, **kwargs)
+
+    @staticmethod
+    def _maybe_convert_object_boxes(data):
+        """Convert object arrays of autograd boxes into ArrayBox instances."""
+
+        if isinstance(data, np.ndarray) and data.dtype == np.object_ and data.size:
+            # only convert if at least one element is an autograd tracer
+            if any(isbox(item) for item in data.flat):
+                return anp.array(data.tolist())
+        return data
 
     @classmethod
     def __get_validators__(cls):

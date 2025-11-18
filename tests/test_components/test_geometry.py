@@ -838,7 +838,7 @@ def test_polyslab_merge():
         return td.PolySlab.from_gds(gds_cell=cell, gds_layer=0, axis=2, slab_bounds=(-1, 1))
 
     polyslabs_gap = make_polyslabs(gap_size=0.3)
-    assert len(polyslabs_gap) == 2, "untouching polylsabs were merged incorrectly."
+    assert len(polyslabs_gap) == 2, "untouching polyslabs were merged incorrectly."
 
     polyslabs_touching = make_polyslabs(gap_size=0)
     assert len(polyslabs_touching) == 1, "polyslabs didn't merge correctly."
