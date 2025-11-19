@@ -6,11 +6,10 @@ import time
 from abc import ABC
 from typing import TYPE_CHECKING, Any, Callable, Literal, Optional, Union
 
-import autograd.numpy as anp
 import numpy as np
 import pydantic.v1 as pydantic
+from autograd import numpy as anp
 from numpy.typing import NDArray
-from pydantic.v1 import PrivateAttr
 
 from tidy3d.components.autograd import AutogradFieldMap, get_static
 from tidy3d.components.autograd.derivative_utils import DerivativeInfo
@@ -51,10 +50,7 @@ class TriangleMesh(base.Geometry, ABC):
     )
 
     _no_nans_mesh = validate_no_nans("mesh_dataset")
-
-    _barycentric_cache: dict[tuple[int, int, tuple[int, ...]], np.ndarray] = PrivateAttr(
-        default_factory=dict
-    )
+    _barycentric_samples: dict[int, NDArray] = pydantic.PrivateAttr(default_factory=dict)
 
     @pydantic.root_validator(pre=True)
     @verify_packages_import(["trimesh"])
@@ -359,7 +355,7 @@ class TriangleMesh(base.Geometry, ABC):
         grid : Tuple[np.ndarray, np.ndarray]
             Tuple of two one-dimensional arrays representing the sampling grid (XY, YZ, or ZX
             corresponding to values of axis)
-        height : NDArray
+        height : np.ndarray
             Height values sampled on the given grid. Can be 1D (raveled) or 2D (matching grid mesh).
 
         Returns
@@ -650,18 +646,18 @@ class TriangleMesh(base.Geometry, ABC):
             log.warning(f"Error encountered: {e}")
             return self.bounding_box.intersections_plane(x=x, y=y, z=z)
 
-    def inside(self, x: NDArray[float], y: NDArray[float], z: NDArray[float]) -> np.ndarray[bool]:
+    def inside(self, x: NDArray, y: NDArray, z: NDArray) -> np.ndarray[bool]:
         """For input arrays ``x``, ``y``, ``z`` of arbitrary but identical shape, return an array
         with the same shape which is ``True`` for every point in zip(x, y, z) that is inside the
         volume of the :class:`Geometry`, and ``False`` otherwise.
 
         Parameters
         ----------
-        x : NDArray[float]
+        x : np.ndarray
             Array of point positions in x direction.
-        y : NDArray[float]
+        y : np.ndarray
             Array of point positions in y direction.
-        z : NDArray[float]
+        z : np.ndarray
             Array of point positions in z direction.
 
         Returns
@@ -812,13 +808,13 @@ class TriangleMesh(base.Geometry, ABC):
         sim_min = np.asarray(sim_min, dtype=dtype)
         sim_max = np.asarray(sim_max, dtype=dtype)
 
-        points_list: list[NDArray] = []
-        normals_list: list[NDArray] = []
-        perps1_list: list[NDArray] = []
-        perps2_list: list[NDArray] = []
-        weights_list: list[NDArray] = []
-        faces_list: list[NDArray] = []
-        bary_list: list[NDArray] = []
+        points_list: list[np.ndarray] = []
+        normals_list: list[np.ndarray] = []
+        perps1_list: list[np.ndarray] = []
+        perps2_list: list[np.ndarray] = []
+        weights_list: list[np.ndarray] = []
+        faces_list: list[np.ndarray] = []
+        bary_list: list[np.ndarray] = []
 
         spacing = max(float(spacing), np.finfo(float).eps)
         triangles_arr = np.asarray(triangles, dtype=dtype)
@@ -844,7 +840,13 @@ class TriangleMesh(base.Geometry, ABC):
                 continue
             perp1, perp2 = perps
 
-            barycentric = self._get_barycentric_samples(tri, spacing, dtype)
+            edge_lengths = (
+                np.linalg.norm(tri[1] - tri[0]),
+                np.linalg.norm(tri[2] - tri[1]),
+                np.linalg.norm(tri[0] - tri[2]),
+            )
+            subdivisions = self._subdivision_count(area, spacing, edge_lengths)
+            barycentric = self._get_barycentric_samples(subdivisions, dtype)
             num_samples = barycentric.shape[0]
             base_weight = area / num_samples
             if per_unit_scale != 1.0:
@@ -912,189 +914,52 @@ class TriangleMesh(base.Geometry, ABC):
         area = 0.5 * norm
         return area, normal
 
-    @staticmethod
-    def _edge_heights(triangle: NDArray) -> tuple[float, float, float]:
-        """Return heights from each vertex to its opposing edge."""
-        tri = np.asarray(triangle, float)
-        heights: list[float] = []
-
-        for i in range(3):
-            v = tri[i]
-            e0 = tri[(i + 1) % 3]
-            e1 = tri[(i + 2) % 3]
-
-            edge = e1 - e0
-            L = float(np.linalg.norm(edge))
-
-            if L < 1e-12:
-                heights.append(0.0)
-                continue
-
-            h = float(np.linalg.norm(np.cross(edge, v - e0)) / L)
-            heights.append(h)
-
-        return tuple(heights)
-
     @classmethod
     def _subdivision_count(
         cls,
         area: float,
         spacing: float,
         edge_lengths: Optional[tuple[float, float, float]] = None,
-        triangle: Optional[NDArray] = None,
-    ) -> tuple[int, int, int]:
-        """Determine per-vertex subdivisions based on orthogonal heights."""
+    ) -> int:
+        """Determine the number of subdivisions needed for the given area and spacing."""
 
         spacing = max(float(spacing), np.finfo(float).eps)
 
-        if triangle is not None:
-            heights = cls._edge_heights(triangle)
-        elif edge_lengths is not None:
-            heights = edge_lengths
-        else:
-            target = np.sqrt(max(area, 0.0))
-            heights = (target, target, target)
+        target = np.sqrt(max(area, 0.0))
+        area_based = np.ceil(np.sqrt(2.0) * target / spacing)
 
-        counts = []
-        for height in heights:
-            if height <= 0.0:
-                counts.append(1)
-            else:
-                counts.append(max(1, int(np.ceil(height / spacing))))
-        return tuple(counts)
+        edge_based = 0.0
+        if edge_lengths:
+            max_edge = max(edge_lengths)
+            if max_edge > 0.0:
+                edge_based = np.ceil(max_edge / spacing)
 
-    def _get_barycentric_samples(
-        self,
-        triangle: NDArray,
-        spacing: float,
-        dtype: np.dtype,
-    ) -> np.ndarray:
-        """Return barycentric sample coordinates for a triangle.
+        subdivisions = max(1, int(max(area_based, edge_based)))
+        return subdivisions
 
-        This uses uniform geometric spacing along rows aligned to the
-        largest height direction, with no points on the triangle edges.
-        Results are cached per (row layout, primary bary index).
-        """
+    def _get_barycentric_samples(self, subdivisions: int, dtype: np.dtype) -> np.ndarray:
+        """Return barycentric sample coordinates for a subdivision level."""
 
-        tri = np.asarray(triangle, float)
-        spacing = max(float(spacing), np.finfo(float).eps)
-
-        # 1) measure heights and choose primary index
-        heights = self._edge_heights(tri)
-        # primary bary index = vertex with largest height
-        primary = int(np.argmax(heights))
-        h_max = heights[primary]
-
-        # number of rows in that direction
-        height_count = max(1, int(np.ceil(h_max / spacing)))
-
-        # 2) for each row, compute physical row length and how many points we want
-        row_counts: list[int] = []
-        other0 = (primary + 1) % 3
-        other1 = (primary + 2) % 3
-
-        for hi in range(height_count):
-            lam_p = (hi + 0.5) / height_count
-            lam_p = min(lam_p, 1.0 - 1e-9)
-            rem = max(1e-9, 1.0 - lam_p)
-
-            lam_start = np.zeros(3)
-            lam_end = np.zeros(3)
-
-            lam_start[primary] = lam_p
-            lam_start[other0] = 0.0
-            lam_start[other1] = rem
-
-            lam_end[primary] = lam_p
-            lam_end[other0] = rem
-            lam_end[other1] = 0.0
-
-            p0 = lam_start @ tri
-            p1 = lam_end @ tri
-            L = float(np.linalg.norm(p1 - p0))
-
-            if L < 1e-12:
-                # degenerate row; still keep a single point to avoid dropping it
-                row_counts.append(1)
-            else:
-                npoints = max(1, int(np.ceil(L / spacing)))
-                row_counts.append(npoints)
-
-        row_counts_t = tuple(row_counts)
-        key = (primary, height_count, row_counts_t)
-
-        cache = self._barycentric_cache
-        if key not in cache:
-            cache[key] = self._build_barycentric_pattern(
-                primary=primary,
-                height_count=height_count,
-                row_counts=row_counts_t,
-            )
-
-        return cache[key].astype(dtype, copy=False)
+        cache = self._barycentric_samples
+        if subdivisions not in cache:
+            cache[subdivisions] = self._build_barycentric_samples(subdivisions)
+        return cache[subdivisions].astype(dtype, copy=False)
 
     @staticmethod
-    def _build_barycentric_pattern(
-        primary: int,
-        height_count: int,
-        row_counts: tuple[int, ...],
-    ) -> np.ndarray:
-        """Construct barycentric sampling points for a given row layout.
+    def _build_barycentric_samples(subdivisions: int) -> np.ndarray:
+        """Construct barycentric sampling points for a given subdivision level."""
 
-        Parameters
-        ----------
-        primary:
-            Barycentric index used as the 'height' direction (0, 1, or 2).
-        height_count:
-            Number of rows in the primary direction.
-        row_counts:
-            Number of points per row (same length as height_count).
+        if subdivisions <= 1:
+            return np.array([[1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0]])
 
-        Returns
-        -------
-        np.ndarray
-            Array of shape (N, 3) with unique barycentric coordinates,
-            each strictly inside the triangle (no component exactly 0 or 1).
-        """
-
-        if len(row_counts) != height_count:
-            raise ValueError(
-                f"row_counts length ({len(row_counts)}) must equal height_count ({height_count})."
-            )
-
-        bary: list[tuple[float, float, float]] = []
-
-        other0 = (primary + 1) % 3
-        other1 = (primary + 2) % 3
-
-        for hi in range(height_count):
-            npoints = max(1, int(row_counts[hi]))
-
-            # row position in barycentric primary coordinate (interior-only)
-            lam_p = (hi + 0.5) / height_count
-            lam_p = min(lam_p, 1.0 - 1e-9)
-            rem = max(1e-9, 1.0 - lam_p)
-
-            lam_start = np.zeros(3)
-            lam_end = np.zeros(3)
-
-            lam_start[primary] = lam_p
-            lam_start[other0] = 0.0
-            lam_start[other1] = rem
-
-            lam_end[primary] = lam_p
-            lam_end[other0] = rem
-            lam_end[other1] = 0.0
-
-            # symmetric interior-only positions along the row
-            ts = (np.arange(npoints, dtype=float) + 0.5) / float(npoints)
-
-            for t in ts:
-                lam = lam_start * (1.0 - t) + lam_end * t
-                bary.append((float(lam[0]), float(lam[1]), float(lam[2])))
-
-        arr = np.asarray(bary, dtype=float)
-        return arr
+        bary = []
+        for i in range(subdivisions):
+            for j in range(subdivisions - i):
+                l1 = (i + 1.0 / 3.0) / subdivisions
+                l2 = (j + 1.0 / 3.0) / subdivisions
+                l0 = 1.0 - l1 - l2
+                bary.append((l0, l1, l2))
+        return np.asarray(bary, dtype=float)
 
     @staticmethod
     def subdivide_faces(vertices: NDArray, faces: NDArray) -> tuple[np.ndarray, np.ndarray]:

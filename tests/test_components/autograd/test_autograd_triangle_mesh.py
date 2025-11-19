@@ -319,7 +319,7 @@ def test_triangle_mesh_gradients_insensitive_to_face_splitting(watertight_mesh):
     offset = 0.12
     grad_func = linear_grad_func_factory(coeffs, offset)
 
-    spacing = 0.002
+    spacing = 0.006
     derivative_info = DummyDerivativeInfo(grad_func, spacing=spacing)
     derivative_info_refined = DummyDerivativeInfo(grad_func, spacing=spacing)
 
@@ -341,4 +341,4 @@ def test_triangle_mesh_gradients_insensitive_to_face_splitting(watertight_mesh):
     dir_base = float(np.sum(grad_base * disp_base))
     dir_refined = float(np.sum(grad_refined * disp_refined))
 
-    npt.assert_allclose(dir_base, dir_refined, rtol=1e-2, atol=5e-6)
+    npt.assert_allclose(dir_base, dir_refined, rtol=5e-3, atol=5e-6)

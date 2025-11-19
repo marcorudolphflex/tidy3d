@@ -119,7 +119,7 @@ class AdjointConfig(ConfigSection):
         title="Points per wavelength",
         description=(
             "Default number of material sample points per wavelength when discretizing "
-            "cylinders for autograd derivatives."
+            "cylinders or spheres for autograd derivatives."
         ),
     )
 

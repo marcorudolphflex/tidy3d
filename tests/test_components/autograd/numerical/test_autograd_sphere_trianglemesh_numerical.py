@@ -30,22 +30,20 @@ SCALE_FACTORS = (0.2, 1.0, 5.0)
 SCALE_AXES = (0, 1, 2)
 
 FREQ0 = td.C_0 / WL_UM
-INFINITE_DIM_SIZE_UM = 0.1
 SRC_OFFSET = -2.5
 MONITOR_OFFSET = 2.5
 N_MAT = 2
 PERMITTIVITY = N_MAT**2
-TARGET_EDGE_LENGTH = WL_UM / 10
+ICOSAHEDRON_SUBDIVISIONS = 3
 LOCAL_GRADIENT = True
 VERBOSE = False
 SHOW_PRINT_STATEMENTS = True
-COMPARE_TO_FINITE_DIFFERENCE = True
 SAVE_OUTPUT_DATA = True
 ANGLE_OVERLAP_FD_ADJ_THRESH_DEG = 10.0
 VERTEX_FD_STEP = 1e-3
-FINITE_DIFF_STEP = 1e-3
-td.config.adjoint.points_per_wavelength = 1
-
+FINITE_DIFF_STEP = 5e-4
+GRID_STEPS_PER_WVL = 40
+td.config.adjoint.points_per_wavelength = 10
 measure_flux_spec = False
 
 freqs = td.C_0 / np.linspace(0.6, 0.7, 101)
@@ -103,9 +101,9 @@ def make_base_simulation(
         run_time=2e-11,
         boundary_spec=boundary_spec_3d,
         grid_spec=td.GridSpec(
-            grid_x=td.UniformGrid(dl=WL_UM / 40),
-            grid_y=td.UniformGrid(dl=WL_UM / 40),
-            grid_z=td.UniformGrid(dl=WL_UM / 40),
+            grid_x=td.UniformGrid(dl=WL_UM / GRID_STEPS_PER_WVL),
+            grid_y=td.UniformGrid(dl=WL_UM / GRID_STEPS_PER_WVL),
+            grid_z=td.UniformGrid(dl=WL_UM / GRID_STEPS_PER_WVL),
         ),
     )
 
@@ -131,7 +129,7 @@ def make_overlap_cube_structure(radii: Sequence[float]) -> td.Structure:
     size_z = float(2.0 * radii_arr[2])
     cube_center = (size_x / 2.0, 0.0, 0.0)
     cube = td.Box(center=cube_center, size=(size_x, size_y, size_z))
-    cube_medium = td.Medium(permittivity=PERMITTIVITY / 2.0)
+    cube_medium = td.Medium(permittivity=PERMITTIVITY)
     return td.Structure(geometry=cube, medium=cube_medium)
 
 
@@ -159,7 +157,9 @@ def run_parameter_simulations(
 
         base_structures = list(getattr(base_sim, "structures", ()))
         structures = [structure, *base_structures]
-        grid_spec = td.GridSpec.auto(min_steps_per_wvl=20, override_structures=[structure])
+        grid_spec = td.GridSpec.auto(
+            min_steps_per_wvl=GRID_STEPS_PER_WVL, override_structures=[structure]
+        )
         sim = base_sim.updated_copy(structures=structures, grid_spec=grid_spec, validate=True)
         # import matplotlib.pyplot as plt
         # sim.plot(z=0)
@@ -199,13 +199,10 @@ def make_sphere_triangle_geometry(
     center: Sequence[float],
     scale_factor: float,
     scale_axis: int,
-    target_edge_length: float = TARGET_EDGE_LENGTH,
+    subdivisions: int = ICOSAHEDRON_SUBDIVISIONS,
 ) -> td.Geometry:
     radii = anp.array(params, dtype=float)
-    mean_radius = radii.mean()
-    unit_sphere_triangles = td.Sphere.unit_sphere_triangles(
-        target_edge_length=target_edge_length / mean_radius
-    )
+    unit_sphere_triangles = td.Sphere.unit_sphere_triangles(subdivisions=subdivisions)
     triangles = anp.array(unit_sphere_triangles)
     triangles = triangles * radii
     axis_selector = anp.equal(anp.arange(3), scale_axis)
@@ -351,16 +348,15 @@ def test_sphere_triangles_match_fd(
     print("triangle_grad\t", triangle_grad.tolist())
     print("fd_grad\t\t", fd_grad.tolist())
 
-    if COMPARE_TO_FINITE_DIFFERENCE:
-        mesh_fd_overlap = angled_overlap_deg(triangle_grad, fd_grad)
-        print(
-            f"TriangleMesh FD vs. Adjoint angle overlap: {mesh_fd_overlap:.3f}° "
-            f"(threshold = {ANGLE_OVERLAP_FD_ADJ_THRESH_DEG}°)"
-        )
-        assert mesh_fd_overlap < ANGLE_OVERLAP_FD_ADJ_THRESH_DEG, (
-            f"FD–adjoint angle overlap too large: {mesh_fd_overlap:.3f}° "
-            f"(threshold {ANGLE_OVERLAP_FD_ADJ_THRESH_DEG}°, "
-        )
+    mesh_fd_overlap = angled_overlap_deg(triangle_grad, fd_grad)
+    print(
+        f"TriangleMesh FD vs. Adjoint angle overlap: {mesh_fd_overlap:.3f}° "
+        f"(threshold = {ANGLE_OVERLAP_FD_ADJ_THRESH_DEG}°)"
+    )
+    assert mesh_fd_overlap < ANGLE_OVERLAP_FD_ADJ_THRESH_DEG, (
+        f"FD–adjoint angle overlap too large: {mesh_fd_overlap:.3f}° "
+        f"(threshold {ANGLE_OVERLAP_FD_ADJ_THRESH_DEG}°, "
+    )
 
     if SAVE_OUTPUT_DATA:
         np.savez(
@@ -372,8 +368,8 @@ def test_sphere_triangles_match_fd(
 
 
 # @pytest.mark.numerical
-@pytest.mark.parametrize("radius_scale", (1, 2, 3))
-@pytest.mark.parametrize("overlap_cube", (False,))
+@pytest.mark.parametrize("radius_scale", (0.25, 0.5, 1, 2, 3))
+@pytest.mark.parametrize("overlap_cube", (False, True))
 def test_native_sphere_match_fd(radius_scale, overlap_cube, tmp_path, numerical_case_dir):
     radius = SPHERE_RADIUS_UM * radius_scale
     params0 = anp.array([radius])
@@ -412,18 +408,17 @@ def test_native_sphere_match_fd(radius_scale, overlap_cube, tmp_path, numerical_
     print("native_grad\t", native_grad.tolist())
     print("fd_grad\t\t", fd_grad.tolist())
 
-    if COMPARE_TO_FINITE_DIFFERENCE:
-        abs_diff = float(np.abs(native_grad - fd_grad))
-        rel_err = abs_diff / max(np.abs(native_grad), np.abs(fd_grad), 1e-12)
-        print(
-            f"Native sphere FD vs. Adjoint absolute diff: {abs_diff:.3e}, "
-            f"relative error: {float(get_static(rel_err)):.3e}"
-        )
-        assert rel_err < 1e-1, (
-            f"Native sphere gradients mismatch: abs_diff={abs_diff:.3e}, "
-            f"rel_err={float(get_static(rel_err)):.3e}, native_grad={native_grad.tolist()}, "
-            f"fd_grad={fd_grad.tolist()}"
-        )
+    abs_diff = float(np.abs(native_grad - fd_grad))
+    rel_err = abs_diff / max(np.abs(native_grad), np.abs(fd_grad), 1e-12)
+    print(
+        f"Native sphere FD vs. Adjoint absolute diff: {abs_diff:.3e}, "
+        f"relative error: {float(get_static(rel_err)):.3e}"
+    )
+    assert rel_err < 1e-1, (
+        f"Native sphere gradients mismatch: abs_diff={abs_diff:.3e}, "
+        f"rel_err={float(get_static(rel_err)):.3e}, native_grad={native_grad.tolist()}, "
+        f"fd_grad={fd_grad.tolist()}"
+    )
 
     if SAVE_OUTPUT_DATA:
         np.savez(
