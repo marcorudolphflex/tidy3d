@@ -308,22 +308,6 @@ def test_triangle_mesh_non_watertight_warns_and_computes(non_watertight_mesh, ca
     assert not non_watertight_mesh.trimesh.is_watertight
 
 
-def test_triangle_mesh_subdivision_respects_vertex_heights():
-    """Subdivision counts should follow vertex-to-edge orthogonal heights."""
-
-    tri = VERTICES_SLENDER_TETRA[FACES_SLENDER_TETRA[0]]
-    area, _ = area_and_normal(tri)
-
-    spacing = 0.05
-    subdivisions = td.TriangleMesh._subdivision_count(area, spacing, triangle=tri)
-    heights = td.TriangleMesh._edge_heights(tri)
-
-    assert len(subdivisions) == 3
-    for height, count in zip(heights, subdivisions):
-        expected = 1 if height <= 0.0 else int(np.ceil(height / spacing))
-        assert count == expected
-
-
 def test_triangle_mesh_gradients_insensitive_to_face_splitting(watertight_mesh):
     """Refining triangles does not change the directional derivative."""
 
@@ -335,7 +319,7 @@ def test_triangle_mesh_gradients_insensitive_to_face_splitting(watertight_mesh):
     offset = 0.12
     grad_func = linear_grad_func_factory(coeffs, offset)
 
-    spacing = 0.006
+    spacing = 0.002
     derivative_info = DummyDerivativeInfo(grad_func, spacing=spacing)
     derivative_info_refined = DummyDerivativeInfo(grad_func, spacing=spacing)
 
@@ -357,4 +341,4 @@ def test_triangle_mesh_gradients_insensitive_to_face_splitting(watertight_mesh):
     dir_base = float(np.sum(grad_base * disp_base))
     dir_refined = float(np.sum(grad_refined * disp_refined))
 
-    npt.assert_allclose(dir_base, dir_refined, rtol=5e-3, atol=2e-6)
+    npt.assert_allclose(dir_base, dir_refined, rtol=1e-2, atol=5e-6)

@@ -43,8 +43,12 @@ COMPARE_TO_FINITE_DIFFERENCE = True
 SAVE_OUTPUT_DATA = True
 ANGLE_OVERLAP_FD_ADJ_THRESH_DEG = 10.0
 VERTEX_FD_STEP = 1e-3
-FINITE_DIFF_STEP = 5e-4
+FINITE_DIFF_STEP = 1e-3
 td.config.adjoint.points_per_wavelength = 1
+
+measure_flux_spec = False
+
+freqs = td.C_0 / np.linspace(0.6, 0.7, 101)
 
 if SHOW_PRINT_STATEMENTS:
     sys.stdout = sys.stderr
@@ -66,12 +70,23 @@ def make_base_simulation(
         direction="+",
     )
 
-    flux_monitor = td.FieldMonitor(
-        center=(0.0, 0.0, MONITOR_OFFSET),
-        size=(*sim_size_3d[:2], 0.0),
-        freqs=[FREQ0],
-        name="field",
-    )
+    flux_monitors = [
+        td.FieldMonitor(
+            center=(0.0, 0.0, MONITOR_OFFSET),
+            size=(*sim_size_3d[:2], 0.0),
+            freqs=FREQ0,
+            name="field",
+        )
+    ]
+    if measure_flux_spec:
+        flux_monitors.append(
+            td.FieldMonitor(
+                center=(0.0, 0.0, MONITOR_OFFSET),
+                size=(*sim_size_3d[:2], 0.0),
+                freqs=freqs,
+                name="field_spectrum",
+            )
+        )
 
     boundary_spec_3d = td.BoundarySpec(
         x=td.Boundary.pml(),
@@ -82,7 +97,7 @@ def make_base_simulation(
     base_sim = td.Simulation(
         center=(0.0, 0.0, 0.0),
         size=tuple(sim_size_3d),
-        monitors=[flux_monitor],
+        monitors=flux_monitors,
         sources=[plane_wave],
         structures=list(extra_structures) if extra_structures else [],
         run_time=2e-11,
@@ -95,7 +110,15 @@ def make_base_simulation(
     )
 
     def fom(sim_data):
-        flux = sim_data["field"].flux.values
+        flux = sim_data["field"].flux.values  # shape: (N_freq,)
+        # flux_spectrum = sim_data["field_spectrum"].flux.values  # shape: (N_freq,)
+        # plt.plot(freqs, flux_spectrum)
+        # plt.xlabel("Frequency (Hz)")
+        # plt.ylabel("Flux")
+        # plt.title("Flux Spectrum")
+        # plt.grid(True)
+        # plt.savefig("flux_spectrum.png")
+        # exit()
         return flux
 
     return base_sim, fom
@@ -136,7 +159,8 @@ def run_parameter_simulations(
 
         base_structures = list(getattr(base_sim, "structures", ()))
         structures = [structure, *base_structures]
-        sim = base_sim.updated_copy(structures=structures, validate=True)
+        grid_spec = td.GridSpec.auto(min_steps_per_wvl=20, override_structures=[structure])
+        sim = base_sim.updated_copy(structures=structures, grid_spec=grid_spec, validate=True)
         # import matplotlib.pyplot as plt
         # sim.plot(z=0)
         # plt.savefig("sphere_simx.png")
@@ -278,7 +302,7 @@ def make_objective(
 @pytest.mark.parametrize("scale_axis", SCALE_AXES)
 # @pytest.mark.parametrize("scale_factor", (1,))
 # @pytest.mark.parametrize("scale_axis", (0,))
-@pytest.mark.parametrize("overlap_cube", (True,))
+@pytest.mark.parametrize("overlap_cube", (False, True))
 def test_sphere_triangles_match_fd(
     scale_factor, scale_axis, overlap_cube, tmp_path, numerical_case_dir
 ):
@@ -347,7 +371,7 @@ def test_sphere_triangles_match_fd(
         )
 
 
-@pytest.mark.numerical
+# @pytest.mark.numerical
 @pytest.mark.parametrize("radius_scale", (1, 2, 3))
 @pytest.mark.parametrize("overlap_cube", (False,))
 def test_native_sphere_match_fd(radius_scale, overlap_cube, tmp_path, numerical_case_dir):
@@ -473,8 +497,8 @@ def test_sphere_fd_step_sweep(tmp_path, scale_factor, scale_axis, overlap_cube, 
 
 
 # @pytest.mark.numerical
-# @pytest.mark.parametrize("radius_scale", (0.25, 0.5, 1, 1.5, 2, 2.5, 3))
-@pytest.mark.parametrize("radius_scale", (1.5,))
+@pytest.mark.parametrize("radius_scale", (0.25, 0.5, 1, 1.5, 2, 2.5, 3))
+# @pytest.mark.parametrize("radius_scale", (1.5,))
 @pytest.mark.parametrize("overlap_cube", (False,))
 def test_native_sphere_fd_step_sweep(tmp_path, radius_scale, overlap_cube, numerical_case_dir):
     radius = SPHERE_RADIUS_UM * radius_scale
@@ -495,8 +519,12 @@ def test_native_sphere_fd_step_sweep(tmp_path, radius_scale, overlap_cube, numer
         tmp_path,
         local_gradient=False,
     )
-
-    steps = np.logspace(-8, -1, num=8)
+    # min_log = -8
+    # max_log = -1
+    min_log = -6
+    max_log = -2
+    n = max_log - min_log + 1
+    steps = np.logspace(min_log, max_log, num=n)
     fd_grads = []
     for step in steps:
         grad = finite_difference_params(native_objective_fd, params0, step)
