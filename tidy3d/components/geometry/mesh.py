@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from abc import ABC
 from typing import TYPE_CHECKING, Any, Callable, Literal, Optional, Union
 
@@ -716,8 +715,6 @@ class TriangleMesh(base.Geometry, ABC):
 
     def _compute_derivatives(self, derivative_info: DerivativeInfo) -> AutogradFieldMap:
         """Compute adjoint derivatives for a ``TriangleMesh`` geometry."""
-
-        start_time = time.perf_counter()  # TODO remove
         vjps: AutogradFieldMap = {}
 
         if not self.mesh_dataset:
@@ -747,8 +744,6 @@ class TriangleMesh(base.Geometry, ABC):
 
         # gather surface samples within the simulation bounds
         dx = derivative_info.adaptive_vjp_spacing()
-        print("dx = ", dx)
-        dx = dx / 6
         samples = self._collect_surface_samples(
             triangles=triangles,
             spacing=dx,
@@ -789,8 +784,6 @@ class TriangleMesh(base.Geometry, ABC):
             np.add.at(triangle_grads[:, vertex_idx, :], faces, scaled)
 
         vjps[("mesh_dataset", "surface_mesh")] = triangle_grads
-        duration = time.perf_counter() - start_time  # TODO REMOVE
-        print(f"TriangleMesh._compute_derivatives runtime: {duration:.3f}s")
         return vjps
 
     def _collect_surface_samples(
@@ -1014,33 +1007,3 @@ class TriangleMesh(base.Geometry, ABC):
             return None
         perp2 = (perp2 / perp2_norm).astype(triangle.dtype, copy=False)
         return perp1, perp2
-
-    @staticmethod
-    def _barycentric_from_points(
-        triangles: NDArray, points: NDArray, dtype: np.dtype
-    ) -> np.ndarray:
-        """Compute barycentric coordinates for points relative to their triangles."""
-
-        v0 = triangles[:, 1] - triangles[:, 0]
-        v1 = triangles[:, 2] - triangles[:, 0]
-        v2 = points - triangles[:, 0]
-
-        d00 = np.einsum("ij,ij->i", v0, v0)
-        d01 = np.einsum("ij,ij->i", v0, v1)
-        d11 = np.einsum("ij,ij->i", v1, v1)
-        d20 = np.einsum("ij,ij->i", v2, v0)
-        d21 = np.einsum("ij,ij->i", v2, v1)
-
-        denom = d00 * d11 - d01 * d01
-        tol = np.finfo(dtype).eps
-        denom_safe = np.where(np.abs(denom) <= tol, 1.0, denom)
-
-        v = (d11 * d20 - d01 * d21) / denom_safe
-        w = (d00 * d21 - d01 * d20) / denom_safe
-        u = 1.0 - v - w
-
-        bary = np.stack([u, v, w], axis=1).astype(dtype, copy=False)
-        degenerate = np.abs(denom) <= tol
-        if np.any(degenerate):
-            bary[degenerate] = 1.0 / 3.0
-        return bary
