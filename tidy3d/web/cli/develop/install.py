@@ -122,6 +122,7 @@ def verify_pipx_is_installed() -> Optional[bool]:
         # This exception is raised if the command returned a non-zero exit status
         print("pipx is not installed or not found in the system PATH.")
         return False
+    return False
 
 
 def verify_poetry_is_installed() -> Optional[bool]:
@@ -150,6 +151,7 @@ def verify_poetry_is_installed() -> Optional[bool]:
     except subprocess.CalledProcessError as exc:
         # This exception is raised if the command returned a non-zero exit status
         raise OSError("Poetry is not installed or not found in the system PATH.") from exc
+    return None
 
 
 def verify_sphinx_is_installed() -> None:
