@@ -3199,3 +3199,30 @@ def test_geometry_group_passes_intersected_bounds_to_children():
     assert object.__getattribute__(big_box, "recorded_bounds_intersect") == group.bounds, (
         f"got {object.__getattribute__(big_box, 'recorded_bounds_intersect')} and {group.bounds}"
     )
+
+
+@pytest.mark.parametrize("monitor_key", ("mode",))
+def test_autograd_sphere_triangle_mesh(use_emulated_run, monitor_key):
+    """Integration test that Sphere gradients are non-zero (mirrors cylinder check)."""
+
+    monitor, postprocess = make_monitors()[monitor_key]
+
+    def make_sphere(radius, x0, y0, z0):
+        return td.Sphere(center=(x0, y0, z0), radius=radius)
+
+    def make_sim(params):
+        geometry = make_sphere(*params)
+        structure = td.Structure(geometry=geometry, medium=td.Medium(permittivity=2))
+        return SIM_BASE.updated_copy(structures=[structure], monitors=[monitor])
+
+    p0 = [0.6, 0.0, 0.0, 0.0]
+
+    def objective(params):
+        sim = make_sim(params)
+        if PLOT_SIM:
+            plot_sim(sim, plot_eps=True)
+        data = run(sim, task_name="autograd_test", verbose=False)
+        return anp.sum(anp.abs(data[monitor.name].amps)).item()
+
+    val_sphere, grad_sphere = ag.value_and_grad(objective)(p0)
+    assert anp.all(grad_sphere != 0.0), "sphere gradients are zero"

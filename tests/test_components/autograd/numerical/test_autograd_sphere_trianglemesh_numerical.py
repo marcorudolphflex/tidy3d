@@ -20,6 +20,7 @@ from tests.test_components.autograd.numerical.test_autograd_box_polyslab_numeric
 )
 from tests.test_components.autograd.test_autograd_triangle_mesh import subdivide_triangles
 from tidy3d import config
+from tidy3d.components.autograd import get_static
 from tidy3d.components.geometry.primitives import _base_icosahedron
 
 config.local_cache.enabled = True
@@ -206,6 +207,10 @@ def make_sphere_triangle_geometry(
     return mesh
 
 
+def make_native_sphere_geometry(params: anp.ndarray, center: Sequence[float]) -> td.Geometry:
+    return td.Sphere(center=tuple(center), radius=params[0])
+
+
 def make_mesh_sphere_from_radius(params: anp.ndarray, center: Sequence[float]) -> td.Geometry:
     radius = params[0]
     radii = anp.full(3, radius)
@@ -294,6 +299,33 @@ def finite_difference_params_step_batch(
 
     grads = np.stack(grads, axis=0)
     return grads[0] if len(grads) == 1 else grads
+
+
+def autograd_gradient_radius_sweep(
+    objective,
+    radius_center: float,
+    sweep_range: float,
+    n_points: int,
+):
+    """Evaluate autograd gradients for radii near ``radius_center``."""
+
+    if n_points < 2:
+        raise ValueError("'n_points' must be at least 2 to define a sweep.")
+
+    half_span = 0.5 * sweep_range
+    radii = np.linspace(radius_center - half_span, radius_center + half_span, n_points)
+
+    values = np.empty_like(radii, dtype=float)
+    gradients = np.empty_like(radii, dtype=float)
+    value_and_grad_fn = value_and_grad(objective)
+
+    for idx, radius in enumerate(radii):
+        params = anp.array([radius])
+        val, grad = value_and_grad_fn([params])
+        values[idx] = float(np.squeeze(get_static(val)))
+        gradients[idx] = float(np.squeeze(get_static(grad)))
+
+    return radii, values, gradients
 
 
 def make_objective(
@@ -488,7 +520,7 @@ def test_grad_insensitive_to_face_splitting(tmp_path, numerical_case_dir):
         )
 
 
-@pytest.mark.skip
+@pytest.mark.numerical
 @pytest.mark.parametrize("scale_factor", SCALE_FACTORS)
 @pytest.mark.parametrize("scale_axis", SCALE_AXES)
 @pytest.mark.parametrize("overlap_cube", (False, True))
@@ -573,4 +605,267 @@ def test_triangle_sphere_fd_step_sweep_ref(
         steps=steps,
         gradients=fd_grads,
         autograd_grad=autograd_grad,
+    )
+
+
+@pytest.mark.numerical
+@pytest.mark.parametrize("radius_scale", (0.25, 0.5, 1))
+@pytest.mark.parametrize("overlap_cube", (False, True))
+@pytest.mark.parametrize("parametrization", ("radius", "center"))
+def test_native_sphere_match_fd(
+    radius_scale, overlap_cube, parametrization, tmp_path, numerical_case_dir
+):
+    """
+    Compares FD gradients with gradients from _compute_derivatives in Sphere.
+    Note that FD gradients are very noise which is why there will be some failing tests with a fixed FD-step
+    """
+    radius = SPHERE_RADIUS_UM * radius_scale
+    radii = [radius, radius, radius]
+    extra_structures = (
+        [make_overlap_cube_structure([radius, radius / 2, radius / 2])] if overlap_cube else []
+    )
+    base_sim, fom = make_base_simulation(radii=radii, extra_structures=extra_structures)
+
+    center = [0.0, 0.0, 0.0]
+    center_params = anp.array(center)
+
+    if parametrization == "radius":
+        params0 = anp.array([radius])
+        geometry_factory = make_native_sphere_geometry
+        objective_suffix = "radius"
+    else:
+        params0 = center_params
+
+        def geometry_factory(params, _unused_center, radius_fixed=radius):
+            return td.Sphere(center=tuple(params), radius=radius_fixed)
+
+        objective_suffix = "center"
+
+    native_objective = make_objective(
+        geometry_factory,
+        center,
+        f"native_sphere_scale_{radius_scale}_cube_{overlap_cube}_param_{objective_suffix}",
+        base_sim,
+        fom,
+        tmp_path,
+        local_gradient=LOCAL_GRADIENT,
+    )
+    native_objective_fd = make_objective(
+        geometry_factory,
+        center,
+        f"native_sphere_fd_scale_{radius_scale}_cube_{overlap_cube}_param_{objective_suffix}",
+        base_sim,
+        fom,
+        tmp_path,
+        local_gradient=False,
+    )
+
+    _, native_grad = value_and_grad(native_objective)([params0])
+    native_grad = np.squeeze(np.asarray(native_grad, dtype=float))
+
+    fd_grad = finite_difference_params(native_objective_fd, params0, FINITE_DIFF_STEP_NATIVE)
+
+    print(
+        "native radius scale",
+        radius_scale,
+        "overlap_cube",
+        overlap_cube,
+        "parametrization",
+        parametrization,
+    )
+    print("native_grad\t", native_grad.tolist())
+    print("fd_grad\t\t", fd_grad.tolist())
+
+    if parametrization == "radius":
+        abs_diff = float(np.abs(native_grad - fd_grad))
+        rel_err = abs_diff / max(np.abs(native_grad), np.abs(fd_grad), 1e-12)
+        print(
+            f"Native sphere FD vs. Adjoint absolute diff: {abs_diff:.3e}, "
+            f"relative error: {float(get_static(rel_err)):.3e}"
+        )
+        assert rel_err < 1e-1, (
+            f"Native sphere gradients mismatch: abs_diff={abs_diff:.3e}, "
+            f"rel_err={float(get_static(rel_err)):.3e}, native_grad={native_grad.tolist()}, "
+            f"fd_grad={fd_grad.tolist()}"
+        )
+        grad_metric = rel_err
+    else:
+        grad_angle_deg = angled_overlap_deg(native_grad, fd_grad)
+        print(
+            f"Native sphere FD vs. Adjoint angle overlap: {grad_angle_deg:.3f}° "
+            f"(threshold = {ANGLE_OVERLAP_FD_ADJ_THRESH_DEG}°)",
+        )
+        assert grad_angle_deg < ANGLE_OVERLAP_FD_ADJ_THRESH_DEG, (
+            f"FD–adjoint angle overlap too large: {grad_angle_deg:.3f}° "
+            f"(threshold {ANGLE_OVERLAP_FD_ADJ_THRESH_DEG}°)"
+        )
+        grad_metric = grad_angle_deg
+
+    if SAVE_OUTPUT_DATA:
+        np.savez(
+            numerical_case_dir
+            / (
+                f"native_sphere_gradients_scale_{radius_scale}_cube_{overlap_cube}"
+                f"_param_{parametrization}.npz"
+            ),
+            native_grad=native_grad,
+            fd_grad=fd_grad,
+            grad_metric=np.array([grad_metric], dtype=float),
+        )
+
+
+@pytest.mark.numerical
+@pytest.mark.parametrize("radius_scale", (0.5, 1, 2))
+@pytest.mark.parametrize("overlap_cube", (True,))
+def test_native_sphere_fd_step_sweep_ref(tmp_path, radius_scale, overlap_cube, numerical_case_dir):
+    """FD step sweep for native sphere with autograd reference."""
+    radius = SPHERE_RADIUS_UM * radius_scale
+    params0 = anp.array([radius])
+
+    radii = [radius, radius, radius]
+    extra_structures = [make_overlap_cube_structure(radii)] if overlap_cube else []
+    base_sim, fom = make_base_simulation(radii=radii, extra_structures=extra_structures)
+
+    center = [0.0, 0.0, 0.0]
+
+    # FD objective
+    native_objective_fd = make_objective(
+        make_native_sphere_geometry,
+        center,
+        f"native_sphere_fd_step_sweep_{radius_scale}_cube_{overlap_cube}",
+        base_sim,
+        fom,
+        tmp_path,
+        local_gradient=False,
+    )
+
+    # Autograd objective (reference)
+    native_objective_autograd = make_objective(
+        make_native_sphere_geometry,
+        center,
+        f"native_sphere_autograd_ref_{radius_scale}_cube_{overlap_cube}",
+        base_sim,
+        fom,
+        tmp_path,
+        local_gradient=True,
+    )
+
+    # ---- Autograd gradient ----
+    _, autograd_grad = value_and_grad(native_objective_autograd)([params0])
+    autograd_grad = float(np.squeeze(np.asarray(autograd_grad, dtype=float)))
+    print(f"native autograd gradient (radius_scale={radius_scale}): {autograd_grad}")
+
+    # ---- Finite-difference sweep ----
+    min_log = -4
+    max_log = -1
+    n = (max_log - min_log + 1) * 2 + 1
+    steps = np.logspace(min_log, max_log, num=n)
+
+    fd_grads = finite_difference_params_step_batch(native_objective_fd, params0, steps)
+    fd_grads = np.asarray(fd_grads, dtype=float)
+
+    for step, grad in zip(steps, fd_grads):
+        print(
+            f"native finite difference step {step:.1e}: "
+            f"gradient {grad.tolist()} cube={overlap_cube} radius_scale={radius_scale}"
+        )
+
+    # ---- Plot ----
+    fig, ax = plt.subplots(figsize=(6, 4))
+    # FD curve
+    ax.plot(steps, fd_grads[:, 0], marker="o", label="radius (FD)")
+    # Autograd reference line in same color
+    ax.axhline(
+        autograd_grad,
+        color=ax.get_lines()[-1].get_color(),
+        linestyle="--",
+        alpha=0.7,
+        label="radius (autograd)",
+    )
+
+    ax.set_xscale("log")
+    ax.set_xlabel("Finite difference step (µm)")
+    ax.set_ylabel("Gradient value")
+    ax.set_title(
+        f"Native sphere FD vs autograd (radius_scale={radius_scale}, overlap_cube={overlap_cube})"
+    )
+    ax.grid(True, which="both", ls=":")
+    ax.legend()
+
+    fig_path = numerical_case_dir / f"rad_{radius_scale}_cube_{overlap_cube}.png"
+    fig.savefig(fig_path, dpi=200)
+    plt.close(fig)
+
+    np.savez(
+        numerical_case_dir / f"rad_{radius_scale}_cube_{overlap_cube}.npz",
+        steps=steps,
+        gradients=fd_grads,
+        autograd_grad=np.array([autograd_grad], dtype=float),
+    )
+
+
+@pytest.mark.parametrize("overlap_cube", (False,))
+def test_native_sphere_autograd_radius_sweep(tmp_path, overlap_cube, numerical_case_dir):
+    """Sample autograd gradients near a target radius and compare to local FD."""
+
+    radius_center = 0.5
+    sweep_range = 0.01
+    sweep_points = 7
+
+    radii = [radius_center, radius_center, radius_center]
+    extra_structures = [make_overlap_cube_structure(radii)] if overlap_cube else []
+    base_sim, fom = make_base_simulation(radii=radii, extra_structures=extra_structures)
+
+    center = [0.0, 0.0, 0.0]
+
+    native_objective_autograd = make_objective(
+        make_native_sphere_geometry,
+        center,
+        f"native_sphere_autograd_sweep_center_{radius_center}_cube_{overlap_cube}",
+        base_sim,
+        fom,
+        tmp_path,
+        local_gradient=True,
+    )
+
+    sweep_radii, sweep_values, sweep_grads = autograd_gradient_radius_sweep(
+        native_objective_autograd,
+        radius_center,
+        sweep_range,
+        sweep_points,
+    )
+    d_sweep = sweep_range / (sweep_points - 1)
+    fd_reference = (sweep_values[2:] - sweep_values[:-2]) / (2 * d_sweep)
+
+    fig, (ax_grad, ax_val) = plt.subplots(2, 1, sharex=True, figsize=(6, 6))
+    ax_grad.plot(sweep_radii, sweep_grads, marker="o", label="autograd gradient")
+    ax_grad.plot(
+        sweep_radii[1:-1],
+        fd_reference,
+        linestyle="--",
+        label=f"FD reference (step={FINITE_DIFF_STEP_NATIVE:.1e})",
+    )
+    ax_grad.set_ylabel("Gradient (a.u.)")
+    ax_grad.set_title(
+        "Autograd gradient sweep"
+        f" (center={radius_center} μm, range={sweep_range}, n={sweep_points})"
+    )
+    ax_grad.grid(True, linestyle=":")
+    ax_grad.legend()
+
+    ax_val.plot(sweep_radii, sweep_values, marker="s", color="tab:blue")
+    ax_val.set_xlabel("Radius (μm)")
+    ax_val.set_ylabel("Objective value (a.u.)")
+    ax_val.grid(True, linestyle=":")
+
+    fig_path = numerical_case_dir / f"center_{radius_center}_cube_{overlap_cube}.png"
+    fig.savefig(fig_path, dpi=200)
+    plt.close(fig)
+
+    np.savez(
+        numerical_case_dir / f"center_{radius_center}_cube_{overlap_cube}.npz",
+        radii=sweep_radii,
+        values=sweep_values,
+        gradients=sweep_grads,
+        fd_reference=np.array([fd_reference]),
     )
