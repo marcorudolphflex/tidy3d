@@ -729,7 +729,7 @@ class UnstructuredGridDataset(Dataset, np.lib.mixins.NDArrayOperatorsMixin, ABC)
                     f" of grid points ({num_points})."
                 )
 
-            values_numpy = vtk["vtk_to_numpy"](array_vtk)
+            values_numpy = np.array(vtk["vtk_to_numpy"](array_vtk), copy=True)
             values_name = array_vtk.GetName()
 
             # vtk doesn't support complex numbers
