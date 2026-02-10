@@ -263,7 +263,7 @@ def traverse_geometries(geometry: GeometryType) -> GeometryType:
 
     Returns
     -------
-    :class:`Geometry`
+    :class:`~tidy3d.Geometry`
         Geometries within the base geometry.
     """
     if isinstance(geometry, base.GeometryGroup):
@@ -308,7 +308,7 @@ def from_shapely(
 
     Returns
     -------
-    :class:`Geometry`
+    :class:`~tidy3d.Geometry`
         Geometry extruded from the 2D data.
     """
     if shape.geom_type == "LinearRing":

@@ -31,3 +31,8 @@ API |:computer:|
     abstract_base
     abstract_models
     viz
+
+.. toctree::
+    :hidden:
+
+    xref_targets

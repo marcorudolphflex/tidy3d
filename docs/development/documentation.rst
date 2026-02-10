@@ -12,6 +12,8 @@ Assuming you already have ``poetry`` and the ``tidy3d develop`` commands install
 
 The output of the build will be in ``_docs/`` and you can view it by opening ``_docs/index.html`` in your browser. You might just have to click the ``index.html`` file to open it in your browser within a File Explorer.
 
+Autosummary stubs under ``docs/api/_autosummary`` are generated and overwritten during the build. Avoid editing those files directly.
+
 Theme
 ------
 
@@ -103,4 +105,3 @@ Writing Documentation
     - for subsections
     ^ for subsubsections
     " for paragraphs
-

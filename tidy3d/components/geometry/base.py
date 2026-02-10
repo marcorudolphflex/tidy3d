@@ -104,7 +104,7 @@ class Geometry(Tidy3dBaseModel, ABC):
     def inside(self, x: NDArray[float], y: NDArray[float], z: NDArray[float]) -> NDArray[bool]:
         """For input arrays ``x``, ``y``, ``z`` of arbitrary but identical shape, return an array
         with the same shape which is ``True`` for every point in zip(x, y, z) that is inside the
-        volume of the :class:`Geometry`, and ``False`` otherwise.
+        volume of the :class:`~tidy3d.Geometry`, and ``False`` otherwise.
 
         Parameters
         ----------
@@ -317,11 +317,11 @@ class Geometry(Tidy3dBaseModel, ABC):
     def intersects(
         self, other: Geometry, strict_inequality: tuple[bool, bool, bool] = [False, False, False]
     ) -> bool:
-        """Returns ``True`` if two :class:`Geometry` have intersecting `.bounds`.
+        """Returns ``True`` if two :class:`~tidy3d.Geometry` have intersecting `.bounds`.
 
         Parameters
         ----------
-        other : :class:`Geometry`
+        other : :class:`~tidy3d.Geometry`
             Geometry to check intersection with.
         strict_inequality : tuple[bool, bool, bool] = [False, False, False]
             For each dimension, defines whether to include equality in the boundaries comparison.
@@ -360,7 +360,7 @@ class Geometry(Tidy3dBaseModel, ABC):
 
         Parameters
         ----------
-        other : :class:`Geometry`
+        other : :class:`~tidy3d.Geometry`
             Geometry to check containment with.
         strict_inequality : tuple[bool, bool, bool] = [False, False, False]
             For each dimension, defines whether to include equality in the boundaries comparison.
@@ -454,18 +454,18 @@ class Geometry(Tidy3dBaseModel, ABC):
 
     @cached_property
     def bounding_box(self) -> Box:
-        """Returns :class:`Box` representation of the bounding box of a :class:`Geometry`.
+        """Returns :class:`~tidy3d.Box` representation of the bounding box of a :class:`~tidy3d.Geometry`.
 
         Returns
         -------
-        :class:`Box`
+        :class:`~tidy3d.Box`
             Geometric object representing bounding box.
         """
         return Box.from_bounds(*self.bounds)
 
     @cached_property
     def zero_dims(self) -> list[Axis]:
-        """A list of axes along which the :class:`Geometry` is zero-sized based on its bounds."""
+        """A list of axes along which the :class:`~tidy3d.Geometry` is zero-sized based on its bounds."""
         zero_dims = []
         for dim in range(3):
             if self.bounds[1][dim] == self.bounds[0][dim]:
@@ -968,7 +968,7 @@ class Geometry(Tidy3dBaseModel, ABC):
 
         Returns
         -------
-        :class:`Geometry`
+        :class:`~tidy3d.Geometry`
             Translated copy of this geometry.
         """
         return Transformed(geometry=self, transform=Transformed.translation(x, y, z))
@@ -987,7 +987,7 @@ class Geometry(Tidy3dBaseModel, ABC):
 
         Returns
         -------
-        :class:`Geometry`
+        :class:`~tidy3d.Geometry`
             Scaled copy of this geometry.
         """
         return Transformed(geometry=self, transform=Transformed.scaling(x, y, z))
@@ -1004,7 +1004,7 @@ class Geometry(Tidy3dBaseModel, ABC):
 
         Returns
         -------
-        :class:`Geometry`
+        :class:`~tidy3d.Geometry`
             Rotated copy of this geometry.
         """
         return Transformed(geometry=self, transform=Transformed.rotation(angle, axis))
@@ -1020,7 +1020,7 @@ class Geometry(Tidy3dBaseModel, ABC):
 
         Returns
         -------
-        :class:`Geometry`
+        :class:`~tidy3d.Geometry`
             Reflected copy of this geometry.
         """
         return Transformed(geometry=self, transform=Transformed.reflection(normal))
@@ -1274,7 +1274,7 @@ class Geometry(Tidy3dBaseModel, ABC):
 
         Returns
         -------
-        :class:`Geometry`
+        :class:`~tidy3d.Geometry`
             Geometries created from the 2D data.
         """
         import gdstk
@@ -1340,7 +1340,7 @@ class Geometry(Tidy3dBaseModel, ABC):
 
         Returns
         -------
-        :class:`Geometry`
+        :class:`~tidy3d.Geometry`
             Geometry extruded from the 2D data.
         """
         return from_shapely(shape, axis, slab_bounds, dilation, sidewall_angle, reference_plane)
@@ -1450,7 +1450,7 @@ class Geometry(Tidy3dBaseModel, ABC):
         Parameters
         ----------
         fname : PathLike
-            Full path to the .gds file to save the :class:`Geometry` slice to.
+            Full path to the .gds file to save the :class:`~tidy3d.Geometry` slice to.
         x : float = None
             Position of plane in x direction, only one of x,y,z can be specified to define plane.
         y : float = None
@@ -1936,7 +1936,7 @@ class Box(SimplePlaneIntersection, Centered):
 
     @classmethod
     def from_bounds(cls, rmin: Coordinate, rmax: Coordinate, **kwargs: Any) -> Self:
-        """Constructs a :class:`Box` from minimum and maximum coordinate bounds
+        """Constructs a :class:`~tidy3d.Box` from minimum and maximum coordinate bounds
 
         Parameters
         ----------
@@ -1965,7 +1965,7 @@ class Box(SimplePlaneIntersection, Centered):
 
     @classmethod
     def surfaces(cls, size: Size, center: Coordinate, **kwargs: Any) -> list[Self]:
-        """Returns a list of 6 :class:`Box` instances corresponding to each surface of a 3D volume.
+        """Returns a list of 6 :class:`~tidy3d.Box` instances corresponding to each surface of a 3D volume.
         The output surfaces are stored in the order [x-, x+, y-, y+, z-, z+], where x, y, and z
         denote which axis is perpendicular to that surface, while "-" and "+" denote the direction
         of the normal vector of that surface. If a name is provided, each output surface's name
@@ -2053,7 +2053,7 @@ class Box(SimplePlaneIntersection, Centered):
 
     @classmethod
     def surfaces_with_exclusion(cls, size: Size, center: Coordinate, **kwargs: Any) -> list[Self]:
-        """Returns a list of 6 :class:`Box` instances corresponding to each surface of a 3D volume.
+        """Returns a list of 6 :class:`~tidy3d.Box` instances corresponding to each surface of a 3D volume.
         The output surfaces are stored in the order [x-, x+, y-, y+, z-, z+], where x, y, and z
         denote which axis is perpendicular to that surface, while "-" and "+" denote the direction
         of the normal vector of that surface. If a name is provided, each output surface's name
@@ -2191,7 +2191,7 @@ class Box(SimplePlaneIntersection, Centered):
     def inside(self, x: NDArray[float], y: NDArray[float], z: NDArray[float]) -> NDArray[bool]:
         """For input arrays ``x``, ``y``, ``z`` of arbitrary but identical shape, return an array
         with the same shape which is ``True`` for every point in zip(x, y, z) that is inside the
-        volume of the :class:`Geometry`, and ``False`` otherwise.
+        volume of the :class:`~tidy3d.Geometry`, and ``False`` otherwise.
 
         Parameters
         ----------
@@ -2274,7 +2274,7 @@ class Box(SimplePlaneIntersection, Centered):
         y: Optional[tuple[pydantic.NonNegativeFloat, pydantic.NonNegativeFloat]] = None,
         z: Optional[tuple[pydantic.NonNegativeFloat, pydantic.NonNegativeFloat]] = None,
     ) -> Box:
-        """Created a padded copy of a :class:`Box` instance.
+        """Created a padded copy of a :class:`~tidy3d.Box` instance.
 
         Parameters
         ----------
@@ -2288,7 +2288,7 @@ class Box(SimplePlaneIntersection, Centered):
         Returns
         -------
         Box
-            Padded instance of :class:`Box`.
+            Padded instance of :class:`~tidy3d.Box`.
         """
 
         # Validate that padding values are non-negative
@@ -2332,18 +2332,18 @@ class Box(SimplePlaneIntersection, Centered):
 
     @cached_property
     def geometry(self) -> Box:
-        """:class:`Box` representation of self (used for subclasses of Box).
+        """:class:`~tidy3d.Box` representation of self (used for subclasses of Box).
 
         Returns
         -------
-        :class:`Box`
-            Instance of :class:`Box` representing self's geometry.
+        :class:`~tidy3d.Box`
+            Instance of :class:`~tidy3d.Box` representing self's geometry.
         """
         return Box(center=self.center, size=self.size)
 
     @cached_property
     def zero_dims(self) -> list[Axis]:
-        """A list of axes along which the :class:`Box` is zero-sized."""
+        """A list of axes along which the :class:`~tidy3d.Box` is zero-sized."""
         return [dim for dim, size in enumerate(self.size) if size == 0]
 
     @cached_property
@@ -2895,7 +2895,7 @@ class Transformed(Geometry):
     def inside(self, x: NDArray[float], y: NDArray[float], z: NDArray[float]) -> NDArray[bool]:
         """For input arrays ``x``, ``y``, ``z`` of arbitrary but identical shape, return an array
         with the same shape which is ``True`` for every point in zip(x, y, z) that is inside the
-        volume of the :class:`Geometry`, and ``False`` otherwise.
+        volume of the :class:`~tidy3d.Geometry`, and ``False`` otherwise.
 
         Parameters
         ----------
@@ -3287,7 +3287,7 @@ class ClipOperation(Geometry):
     def inside(self, x: NDArray[float], y: NDArray[float], z: NDArray[float]) -> NDArray[bool]:
         """For input arrays ``x``, ``y``, ``z`` of arbitrary but identical shape, return an array
         with the same shape which is ``True`` for every point in zip(x, y, z) that is inside the
-        volume of the :class:`Geometry`, and ``False`` otherwise.
+        volume of the :class:`~tidy3d.Geometry`, and ``False`` otherwise.
 
         Parameters
         ----------
@@ -3508,7 +3508,7 @@ class GeometryGroup(Geometry):
     def inside(self, x: NDArray[float], y: NDArray[float], z: NDArray[float]) -> NDArray[bool]:
         """For input arrays ``x``, ``y``, ``z`` of arbitrary but identical shape, return an array
         with the same shape which is ``True`` for every point in zip(x, y, z) that is inside the
-        volume of the :class:`Geometry`, and ``False`` otherwise.
+        volume of the :class:`~tidy3d.Geometry`, and ``False`` otherwise.
 
         Parameters
         ----------
