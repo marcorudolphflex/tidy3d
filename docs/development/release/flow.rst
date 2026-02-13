@@ -60,7 +60,7 @@ a clean branch on your machine.
 
 Develop your code in this new branch, committing your changes when it seems like a natural time to “save your progress”.
 
-If you are working on a new feature, make sure you add a line in the `CHANGELOG.md <https://github.com/flexcompute/Tidy3D-client-revamp/blob/develop/CHANGELOG.md>`_ file (if it exists in that repository) to summarize your changes.
+If your PR has a user-visible change, add a changelog fragment in ``changelog.d/`` instead of editing ``CHANGELOG.md`` directly. Use the file pattern ``<PR_NUMBER>.<type>.md`` where ``type`` is one of ``added``, ``breaking``, ``changed``, or ``fixed``. Write one short plain sentence without a leading bullet (Towncrier adds bullets during release builds).
 
 
 3. Create a pull request on GitHub
@@ -118,7 +118,7 @@ rebasing has changed its history.
 Every PR must have the following before it can be merged:
 
 - At least one review.
-- A description in the CHANGELOG of what has been done.
+- For user-visible changes, at least one changelog fragment in ``changelog.d/``.
 
 Every new major feature must also pass all of the following before it can be merged:
 

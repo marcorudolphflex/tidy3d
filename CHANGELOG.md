@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+<!-- towncrier release notes start -->
 
 ### Added
 - Added `GeometryArray` class for efficiently representing multiple copies of a base geometry at specified offsets with transformation matrices. Includes a convenience method `geometry.array(offsets=..., transforms=...)` on all geometry objects.
@@ -2004,7 +2004,6 @@ which fields are to be projected is now determined automatically based on the me
 - Job and Batch classes for better simulation handling (eventually to fully replace webapi functions).
 - A large number of small improvements and bug fixes.
 
-[Unreleased]: https://github.com/flexcompute/tidy3d/compare/v2.10.2...develop
 [2.10.2]: https://github.com/flexcompute/tidy3d/compare/v2.10.1...v2.10.2
 [2.10.1]: https://github.com/flexcompute/tidy3d/compare/v2.10.0...v2.10.1
 [2.10.0]: https://github.com/flexcompute/tidy3d/compare/v2.9.3...v2.10.0

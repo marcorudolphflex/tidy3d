@@ -150,6 +150,26 @@ Manual or called workflow that updates `poetry.lock`, authenticates against AWS 
 
 The workflow creates a PR with branch name `chore/update-poetry-lock-{source_branch}` targeting the specified source branch.
 
+### `tidy3d-python-client-build-changelog-pr.yml`
+
+Manual workflow that builds `CHANGELOG.md` from Towncrier fragments and opens a PR.
+
+**Key inputs:**
+- `source_branch` – branch to checkout and build changelog from (defaults to `develop`).
+- `target_branch` – branch to open the PR against (defaults to `develop`).
+- `release_version` – optional override for the release version. If omitted, it is derived from `pyproject.toml` by stripping `.devN`.
+- `release_date` – optional override in `YYYY-MM-DD`. If omitted, UTC `today` is used.
+- `previous_version` – optional override for the compare-link previous version. If omitted, the latest reachable stable `vX.Y.Z` tag is used.
+- `run_workflow` – boolean guard to enable/disable execution.
+
+The workflow:
+1. Installs Poetry dependencies (`--extras dev`).
+2. Runs `towncrier build --yes`.
+3. Runs `scripts/changelog_refs.py` to update compare reference links.
+4. Opens a PR with the generated changelog updates.
+
+If no fragments are present in `changelog.d/`, the workflow exits without opening a PR.
+
 ## Documentation Workflows
 
 ### `tidy3d-docs-sync-readthedocs-repo.yml`
