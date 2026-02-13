@@ -101,6 +101,9 @@ jobs:
           if [[ -z "$prevver" ]]; then
             prevver=$(git tag --merged HEAD --list 'v*' --sort=-v:refname | sed 's/^v//' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | grep -v "^${relver}$" | head -n1 || true)
           fi
+          if [[ -z "$prevver" ]]; then
+            prevver=$(grep -E '^## \[[0-9]+\.[0-9]+\.[0-9]+\] - ' CHANGELOG.md | sed -E 's/^## \[([0-9]+\.[0-9]+\.[0-9]+)\].*/\1/' | grep -v "^${relver}$" | head -n1 || true)
+          fi
 
           safe_source_branch=$(echo "$SOURCE_BRANCH" | tr '/ ' '--')
 
@@ -118,9 +121,13 @@ jobs:
           else
             echo "changes_detected=true" >> "$GITHUB_OUTPUT"
           fi
+          previous_version_output="${prevver}"
+          if [[ -z "$previous_version_output" ]]; then
+            previous_version_output="auto-detected"
+          fi
           echo "release_version=${relver}" >> "$GITHUB_OUTPUT"
           echo "release_date=${reldate}" >> "$GITHUB_OUTPUT"
-          echo "previous_version=${prevver}" >> "$GITHUB_OUTPUT"
+          echo "previous_version=${previous_version_output}" >> "$GITHUB_OUTPUT"
           echo "safe_source_branch=${safe_source_branch}" >> "$GITHUB_OUTPUT"
 
       - name: Create Pull Request

@@ -387,7 +387,11 @@ jobs:
 
       - name: enforce-jira-key
         id: enforce-jira-key
-        if: github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]'
+        if: >
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.user.login != 'dependabot[bot]' &&
+          !startsWith(github.event.pull_request.head.ref, 'chore/build-changelog-') &&
+          !startsWith(github.event.pull_request.head.ref, 'chore/update-poetry-lock-')
         env:
           STEPS_EXTRACT_BRANCH_NAME_OUTPUTS_BRANCH_NAME: ${{ steps.extract-branch-name.outputs.branch_name }}
         run: |

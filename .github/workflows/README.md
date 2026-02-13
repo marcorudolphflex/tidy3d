@@ -148,7 +148,7 @@ Manual or called workflow that updates `poetry.lock`, authenticates against AWS 
 - `source_branch` – branch to checkout and update lockfile for (defaults to `develop`). Useful for updating lockfiles on feature branches or release branches.
 - `run_workflow` – boolean to enable/disable the workflow execution.
 
-The workflow creates a PR with branch name `chore/update-poetry-lock-{source_branch}` targeting the specified source branch.
+The workflow creates a PR with branch name `chore/update-poetry-lock-{source_branch}` targeting the specified source branch. These generated PR branches are exempt from Jira branch-name linting in CI.
 
 ### `tidy3d-python-client-build-changelog-pr.yml`
 
@@ -159,7 +159,7 @@ Manual workflow that builds `CHANGELOG.md` from Towncrier fragments and opens a 
 - `target_branch` – branch to open the PR against (defaults to `develop`).
 - `release_version` – optional override for the release version. If omitted, it is derived from `pyproject.toml` by stripping `.devN`.
 - `release_date` – optional override in `YYYY-MM-DD`. If omitted, UTC `today` is used.
-- `previous_version` – optional override for the compare-link previous version. If omitted, the latest reachable stable `vX.Y.Z` tag is used.
+- `previous_version` – optional override for the compare-link previous version. If omitted, the workflow uses the latest reachable stable `vX.Y.Z` tag, and falls back to the latest stable heading in `CHANGELOG.md` when no tag is available.
 - `run_workflow` – boolean guard to enable/disable execution.
 
 The workflow:
@@ -169,6 +169,8 @@ The workflow:
 4. Opens a PR with the generated changelog updates.
 
 If no fragments are present in `changelog.d/`, the workflow exits without opening a PR.
+
+The workflow creates PR branches with prefix `chore/build-changelog-...`; these generated PR branches are exempt from Jira branch-name linting in CI.
 
 ## Documentation Workflows
 
