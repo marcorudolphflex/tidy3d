@@ -16,6 +16,7 @@ import toml
 
 REFERENCE_RE = re.compile(r"^\[([^\]]+)\]:\s+(\S+)\s*$")
 DEV_SUFFIX_RE = re.compile(r"\.dev\d+$")
+RELEASE_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
 
 def _run_git_command(*args: str) -> str:
@@ -45,17 +46,21 @@ def _derive_release_version(pyproject_path: Path) -> str:
 
 
 def _find_previous_version(new_version: str) -> str:
-    """Find the latest reachable v* tag excluding the new tag."""
+    """Find the latest reachable stable vX.Y.Z tag excluding the new version."""
     tags = _run_git_command(
         "tag", "--merged", "HEAD", "--list", "v*", "--sort=-v:refname"
     ).splitlines()
-    new_tag = f"v{new_version}"
     for tag in tags:
         tag = tag.strip()
-        if not tag or tag == new_tag:
+        if not tag:
             continue
-        return tag.removeprefix("v")
-    raise RuntimeError("Could not determine previous v* tag reachable from HEAD.")
+        candidate_version = tag.removeprefix("v")
+        if not RELEASE_VERSION_RE.fullmatch(candidate_version):
+            continue
+        if candidate_version == new_version:
+            continue
+        return candidate_version
+    raise RuntimeError("Could not determine previous stable vX.Y.Z tag reachable from HEAD.")
 
 
 def _update_reference_links(
