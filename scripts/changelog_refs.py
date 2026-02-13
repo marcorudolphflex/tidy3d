@@ -15,6 +15,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 fallback
 import toml
 
 REFERENCE_RE = re.compile(r"^\[([^\]]+)\]:\s+(\S+)\s*$")
+RELEASE_HEADING_RE = re.compile(r"^##\s+\[([^\]]+)\]")
 DEV_SUFFIX_RE = re.compile(r"\.dev\d+$")
 RELEASE_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
@@ -61,6 +62,21 @@ def _find_previous_version(new_version: str) -> str:
             continue
         return candidate_version
     raise RuntimeError("Could not determine previous stable vX.Y.Z tag reachable from HEAD.")
+
+
+def _find_previous_version_from_changelog(changelog_path: Path, new_version: str) -> str:
+    """Find the latest stable release heading in CHANGELOG.md excluding the new version."""
+    for line in changelog_path.read_text(encoding="utf-8").splitlines():
+        match = RELEASE_HEADING_RE.match(line)
+        if not match:
+            continue
+        candidate_version = match.group(1).strip()
+        if not RELEASE_VERSION_RE.fullmatch(candidate_version):
+            continue
+        if candidate_version == new_version:
+            continue
+        return candidate_version
+    raise RuntimeError("Could not determine previous stable release from CHANGELOG.md headings.")
 
 
 def _update_reference_links(
@@ -112,7 +128,11 @@ def main() -> int:
     )
     parser.add_argument(
         "--previous-version",
-        help="Previous release version (with or without leading v). Defaults to latest reachable v* tag.",
+        help=(
+            "Previous release version (with or without leading v). "
+            "Defaults to latest reachable stable vX.Y.Z tag; if unavailable, "
+            "falls back to latest stable release heading in CHANGELOG.md."
+        ),
     )
     parser.add_argument(
         "--changelog",
@@ -145,7 +165,19 @@ def main() -> int:
         raise ValueError("New release version is empty.")
 
     previous_version = args.previous_version.removeprefix("v") if args.previous_version else None
-    previous_version = previous_version or _find_previous_version(new_version)
+    if previous_version is None:
+        try:
+            previous_version = _find_previous_version(new_version)
+        except (RuntimeError, subprocess.CalledProcessError):
+            previous_version = _find_previous_version_from_changelog(changelog_path, new_version)
+            print(
+                (
+                    "No stable git tag found; "
+                    f"falling back to latest stable release in {changelog_path}: "
+                    f"{previous_version}"
+                ),
+                file=sys.stderr,
+            )
     if previous_version == new_version:
         raise ValueError("Previous version must differ from new version.")
 
