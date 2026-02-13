@@ -60,7 +60,7 @@ a clean branch on your machine.
 
 Develop your code in this new branch, committing your changes when it seems like a natural time to “save your progress”.
 
-If your PR has a user-visible change, add a changelog fragment in ``changelog.d/`` instead of editing ``CHANGELOG.md`` directly. Use the file pattern ``<PR_NUMBER>.<type>.md`` where ``type`` is one of ``added``, ``breaking``, ``changed``, or ``fixed``. Write one short plain sentence without a leading bullet (Towncrier adds bullets during release builds).
+If your PR has a user-visible change, add a changelog fragment in ``changelog.d/`` instead of editing ``CHANGELOG.md`` directly. Use the file pattern ``<PR_NUMBER>.<type>.md`` where ``type`` is one of ``added``, ``breaking``, ``planned_deprecation``, ``changed``, or ``fixed``. Write one short plain sentence without a leading bullet (Towncrier adds bullets during release builds).
 
 
 3. Create a pull request on GitHub

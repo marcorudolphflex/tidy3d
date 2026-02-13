@@ -13,13 +13,15 @@ Examples:
 
 - `1234.added.md`
 - `1235.breaking.md`
-- `1236.changed.md`
-- `1237.fixed.md`
+- `1236.planned_deprecation.md`
+- `1237.changed.md`
+- `1238.fixed.md`
 
 ## Allowed fragment types
 
 - `added`
 - `breaking`
+- `planned_deprecation`
 - `changed`
 - `fixed`
 
@@ -33,5 +35,6 @@ Examples:
 
 - `added`: `Added GeometryArray for efficiently representing repeated geometry instances.`
 - `breaking`: `ModeSortSpec.sort_key is now required; update any code relying on None defaults.`
+- `planned_deprecation`: `CurrentIntegralAxisAligned is deprecated and will be removed in a future release; use AxisAlignedCurrentIntegral.`
 - `changed`: `Improved local cache performance for repeated result loads.`
 - `fixed`: `Fixed race conditions when reading the local configuration directory in parallel jobs.`

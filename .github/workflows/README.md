@@ -148,7 +148,7 @@ Manual or called workflow that updates `poetry.lock`, authenticates against AWS 
 - `source_branch` – branch to checkout and update lockfile for (defaults to `develop`). Useful for updating lockfiles on feature branches or release branches.
 - `run_workflow` – boolean to enable/disable the workflow execution.
 
-The workflow creates a PR with branch name `chore/update-poetry-lock-{source_branch}` targeting the specified source branch. These generated PR branches are exempt from Jira branch-name linting in CI.
+The workflow creates a PR with branch name `chore/update-poetry-lock-{source_branch}` targeting the specified source branch.
 
 ### `tidy3d-python-client-build-changelog-pr.yml`
 
@@ -169,8 +169,6 @@ The workflow:
 4. Opens a PR with the generated changelog updates.
 
 If no fragments are present in `changelog.d/`, the workflow exits without opening a PR.
-
-The workflow creates PR branches with prefix `chore/build-changelog-...`; these generated PR branches are exempt from Jira branch-name linting in CI.
 
 ## Documentation Workflows
 
