@@ -7,23 +7,28 @@ Fragments are strongly recommended for user-facing PRs, but not enforced as a ha
 
 Create one file per change using:
 
-`<PR_NUMBER>.<type>.md`
+- Single entry for a PR/type: `<PR_NUMBER>.<type>.md`
+- Multiple entries for the same PR/type: `<PR_NUMBER>.<N>.<type>.md` where `N` starts at `1`
 
 Examples:
 
 - `1234.added.md`
-- `1235.breaking.md`
-- `1236.planned_deprecation.md`
-- `1237.changed.md`
-- `1238.fixed.md`
+- `1235.1.added.md`
+- `1235.2.added.md`
+- `1236.changed.md`
+- `1237.fixed.md`
+- `1238.removed.md`
+- `1239.breaking.md`
+- `1240.planned_deprecation.md`
 
 ## Allowed fragment types
 
 - `added`
-- `breaking`
-- `planned_deprecation`
 - `changed`
 - `fixed`
+- `removed`
+- `breaking`
+- `planned_deprecation`
 
 ## Content format
 
@@ -34,7 +39,8 @@ Examples:
 Examples:
 
 - `added`: `Added GeometryArray for efficiently representing repeated geometry instances.`
-- `breaking`: `ModeSortSpec.sort_key is now required; update any code relying on None defaults.`
-- `planned_deprecation`: `CurrentIntegralAxisAligned is deprecated and will be removed in a future release; use AxisAlignedCurrentIntegral.`
 - `changed`: `Improved local cache performance for repeated result loads.`
 - `fixed`: `Fixed race conditions when reading the local configuration directory in parallel jobs.`
+- `removed`: `Removed the deprecated legacy material alias from the public API.`
+- `breaking`: `ModeSortSpec.sort_key is now required; update any code relying on None defaults.`
+- `planned_deprecation`: `CurrentIntegralAxisAligned is deprecated and will be removed in a future release; use AxisAlignedCurrentIntegral.`
