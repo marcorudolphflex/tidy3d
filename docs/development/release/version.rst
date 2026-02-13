@@ -143,6 +143,26 @@ Examples
    workflow_control: start-deploy
    # Skips tag creation and tests
 
+Release Changelog Build
+^^^^^^^^^^^^^^^^^^^^^^^
+
+Before running the release workflow, generate release notes from ``changelog.d`` fragments:
+
+.. code-block:: bash
+
+   RELVER=$(poetry version -s | sed -E 's/\.dev[0-9]+$//')
+   RELDATE=$(date -u +%F)
+   poetry run towncrier build --yes --version "${RELVER}" --date "${RELDATE}"
+   poetry run python scripts/changelog_refs.py --version "${RELVER}"
+
+This sequence:
+
+- Derives the release version from ``pyproject.toml`` (for example ``2.11.0.dev0`` -> ``2.11.0``).
+- Builds ``CHANGELOG.md`` and consumes fragment files.
+- Adds or updates the reference-style compare link for ``[RELVER]`` using the latest reachable ``v*`` tag as the previous version.
+
+Commit the updated ``CHANGELOG.md`` and removed fragment files in the same release commit.
+
 Best Practices
 ^^^^^^^^^^^^^^
 
